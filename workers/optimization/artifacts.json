@@ -1,0 +1,24 @@
+{
+  "llmlingua2": {
+    "model": "microsoft/llmlingua-2-xlm-roberta-large-meetingbank",
+    "revision": "ebaba9b0e874dadd3003ffcff828e4397e568089",
+    "license": "MIT"
+  },
+  "sot": {
+    "model": "saytes/SoT_DistilBERT",
+    "revision": "c95f17f27678e4ea65120cfbfdc2fa5ebb07773f",
+    "license": "MIT",
+    "source": "https://github.com/SimonAytes/SoT",
+    "sourceRevision": "94c6b8d17f3fe7f7fe536ddc868e257bdfe9d654"
+  },
+  "embed": {
+    "model": "sentence-transformers/all-MiniLM-L6-v2",
+    "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+    "license": "Apache-2.0"
+  },
+  "verify": {
+    "model": "cross-encoder/nli-deberta-v3-small",
+    "revision": "fa2804872c3b4bd748f38c0185cc85775361e735",
+    "license": "Apache-2.0"
+  }
+}

@@ -1,0 +1,20 @@
+# Downloaded weights and tokenizer data; mounted separately at runtime.
+# artifacts.json and artifacts/sot/ are required, versioned source inputs.
+models/
+nltk_data/
+
+# Local Python environments, bytecode and tool output.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local credentials.
+.env
+.env.*
+!.env.example

@@ -1,0 +1,47 @@
+# Runtime data is mounted separately; keep it out of the build context.
+models/
+nltk_data/
+
+# Local environments, generated caches and credentials.
+.venv/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.env
+.env.*
+.git/
+
+# Keep artifacts.json, artifacts/sot/ (including LICENSE), and requirements.lock.
+
+# This worker has its own build context; root exclusions do not apply here.
+**/.env
+**/.env.*
+**/.envrc
+**/.venv
+**/venv
+**/.idea
+**/.DS_Store
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite3
+**/*.sqlite3-*
+**/*.sql
+**/*.dump
+**/*.log
+**/*.bak
+**/*.backup
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/.aws
+**/.ssh
+**/credentials
+**/secrets

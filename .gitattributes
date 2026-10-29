@@ -1,0 +1,2 @@
+# Release archives contain user-facing source/docs, not the private audit record.
+docs/PUBLIC_RELEASE_AUDIT.md export-ignore

@@ -1,0 +1,17 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Keep the Dockerfile CMD: run_service.py migrates the database, starts both
+# processes, and reads PORT directly from the environment for Gunicorn.
+#
+# Healthcheck hits /healthz — a public, auth-free, DB-free liveness endpoint that
+# returns 200 as soon as the process serves. (/api/health is auth-gated for the UI
+# and would return 401 to the healthcheck.)
+healthcheckPath = "/healthz"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+# One existing service/volume; run_service.py supervises web + durable worker.
+numReplicas = 1

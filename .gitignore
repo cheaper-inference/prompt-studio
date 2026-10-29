@@ -1,0 +1,60 @@
+#ignore environment
+.venv/
+.env
+.env.*
+!.env.example
+.envrc
+venv/
+
+#ignore python local operation artifacts
+**/__pycache__/
+*.pyc
+
+#ignore optimization artifacts
+mlflow.db
+mlruns/
+manual/
+# live/manual probes need creds — keep them out of CI; keep the offline suite tracked
+test/*
+!test/__init__.py
+!test/test_*
+examples/
+datasets/
+# SQLite WAL side files (WAL mode, see settings.py)
+*.sqlite3-wal
+*.sqlite3-shm
+mlflow.db-wal
+mlflow.db-shm
+
+# Local databases, exports, logs and backups can contain prompts or credentials.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.sql
+*.dump
+*.log
+*.bak
+*.backup
+
+# Private credentials; sanitized environment templates remain tracked above.
+*.pem
+*.key
+*.p12
+*.pfx
+.aws/
+.ssh/
+credentials/
+secrets/
+
+# Developer state and generated test/tool output.
+.idea/
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/

@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="440" viewBox="0 0 1280 440" role="img" aria-labelledby="title desc">
+  <title id="title">Prompt Studio — Better prompts. Measured decisions.</title>
+  <desc id="desc">An open-source workspace built on GEPA. Start with a prompt, reflect on feedback, evaluate candidates, and keep what works.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0c1428"/><stop offset="1" stop-color="#1c2145"/></linearGradient>
+    <linearGradient id="accent" x2="1" y2="1"><stop stop-color="#7dd3fc"/><stop offset="1" stop-color="#a5a0ff"/></linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#fff" stroke-opacity=".035"/></pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="m1 1 8 4-8 4" fill="none" stroke="#98a3d7" stroke-width="1.5"/></marker>
+  </defs>
+  <rect width="1280" height="440" rx="24" fill="url(#bg)"/>
+  <rect width="1280" height="440" rx="24" fill="url(#grid)"/>
+  <g font-family="Inter, system-ui, -apple-system, Segoe UI, sans-serif">
+    <rect x="56" y="46" width="31" height="31" rx="9" fill="#7473f4"/>
+    <path d="m71.5 53 8 8.5-8 8.5-8-8.5Z" fill="none" stroke="#fff" stroke-width="1.3"/>
+    <text x="101" y="67" fill="#c8cff1" font-size="15" font-weight="650" letter-spacing="2.4">PROMPT STUDIO</text>
+    <text x="56" y="157" fill="#fff" font-size="58" font-weight="730" letter-spacing="-2">Better prompts.</text>
+    <text x="56" y="223" fill="url(#accent)" font-size="58" font-weight="730" letter-spacing="-2">Measured decisions.</text>
+    <text x="59" y="270" fill="#aeb9d5" font-size="20">Optimize, compare, and learn from feedback.</text>
+    <rect x="57" y="315" width="153" height="37" rx="18.5" fill="#ffffff" fill-opacity=".055" stroke="#ffffff" stroke-opacity=".12"/>
+    <text x="78" y="339" fill="#dce3f5" font-size="13">Built on GEPA</text>
+    <rect x="221" y="315" width="155" height="37" rx="18.5" fill="#ffffff" fill-opacity=".055" stroke="#ffffff" stroke-opacity=".12"/>
+    <text x="243" y="339" fill="#dce3f5" font-size="13">MIT licensed</text>
+    <text x="59" y="399" fill="#7f8dac" font-size="12" letter-spacing="1.2">AN OPEN-SOURCE PROJECT BY CHEAPER INFERENCE</text>
+    <rect x="756" y="56" width="462" height="327" rx="19" fill="#10182f" stroke="#3d466b"/>
+    <circle cx="779" cy="78" r="4" fill="#526080"/><circle cx="794" cy="78" r="4" fill="#526080"/><circle cx="809" cy="78" r="4" fill="#526080"/>
+    <text x="1189" y="83" text-anchor="end" fill="#7f8dac" font-size="11" letter-spacing="1.2">THE FEEDBACK LOOP</text>
+    <path d="M990 167H1050" stroke="#98a3d7" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <path d="M1120 204V252H990" fill="none" stroke="#98a3d7" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <path d="M849 251H816V169H840" fill="none" stroke="#98a3d7" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="841" y="133" width="149" height="68" rx="11" fill="#283255" stroke="#4b5d89"/>
+    <text x="862" y="158" fill="#a3b5e3" font-size="10" letter-spacing="1.8">START WITH</text>
+    <text x="861" y="182" fill="#fff" font-size="19" font-weight="600">Your prompt</text>
+    <rect x="1051" y="133" width="138" height="68" rx="11" fill="#28264c" stroke="#595086"/>
+    <text x="1071" y="159" fill="#c2b6fb" font-size="10" letter-spacing="1.8">PROPOSE</text>
+    <text x="1070" y="183" fill="#fff" font-size="19" font-weight="600">Reflect</text>
+    <rect x="850" y="220" width="140" height="68" rx="11" fill="#173847" stroke="#326575"/>
+    <text x="869" y="246" fill="#86d9dd" font-size="10" letter-spacing="1.8">TEST + SCORE</text>
+    <text x="869" y="270" fill="#fff" font-size="19" font-weight="600">Evaluate</text>
+    <path d="M784 321H1190" stroke="#293552"/>
+    <circle cx="794" cy="349" r="4" fill="#79d3c3"/>
+    <text x="808" y="354" fill="#aeb9d5" font-size="13">Keep what works. Repeat with feedback.</text>
+  </g>
+</svg>
