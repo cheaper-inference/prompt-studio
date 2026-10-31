@@ -76,12 +76,22 @@ def run_round(job, payload):
                                     deployed_prompt=task.deployed_prompt or None, progress=_jobs._stage(job, "Writing"),
                                     parallel=_config.PARALLEL)
         # Judged PARALLEL at a time, and each batch saved at once: the first outputs can be reviewed
-        # while the rest are still being judged.
+        # while the rest are still being judged. An output the judge cannot answer (after its retries)
+        # is saved without a verdict, and the round goes on; a batch with no answer at all means the
+        # judge is down, so the rest are saved without calling it. Either way the outputs, already
+        # written, are kept: they are shown without a verdict and judged again later (stale_waiting).
+        failures, down = [], False
         for start in range(0, len(candidates), _config.PARALLEL):
-            job.stage = f"Judging {round(100 * start / len(candidates))}%" + _judging._judge_speed()
             batch = list(enumerate(candidates))[start:start + _config.PARALLEL]
-            verdicts = _judging._verdicts(qcr, [{"id": c["id"], "input": c["input"], "output": c["output"]} for _, c in batch],
-                                 make_judge, make_item_judge)
+            rows = [{"id": c["id"], "input": c["input"], "output": c["output"]} for _, c in batch]
+            if down:
+                verdicts = {r["id"]: (None, []) for r in rows}
+                failures += [(r["id"], None) for r in rows]
+            else:
+                job.stage = f"Judging {round(100 * start / len(candidates))}%" + _judging._judge_speed()
+                before = len(failures)
+                verdicts = _judging._verdicts(qcr, rows, make_judge, make_item_judge, failures=failures)
+                down = _judging.judge_down(rows, failures[before:])
             MiniMeLabel.objects.bulk_create([
                 MiniMeLabel(task=task, round=number, position=n, source="generated", split=c["split"],
                             input=c["input"], output=c["output"], kind=c["kind"], target=c["target"] or "",
@@ -89,8 +99,21 @@ def run_round(job, payload):
                             judged_failed=verdicts[c["id"]][1], judged_version=qcr.version,
                             judged_at=configured)   # when the judge was read: a later change makes it stale
                 for n, c in batch])
-        _store.log(task, f"{len(candidates)} new outputs to review.", kind="routine")
-        _jobs._finish(job, {"round": number, "candidates": len(candidates)})
+        if failures:
+            why = _judging.failure_text([f for f in failures if f[1] is not None])
+            _store.log(task, f"{len(candidates)} new outputs to review. MiniMe could not judge {len(failures)} of them"
+                       + (" (the judge is not answering" if down else " (") + f"; {why}); they show without a verdict "
+                       "and are judged again later.", kind="routine")
+        else:
+            _store.log(task, f"{len(candidates)} new outputs to review.", kind="routine")
+        _jobs._finish(job, {"round": number, "candidates": len(candidates),
+                            **({"unjudged": len(failures), "judge_down": down} if failures else {})})
+        if failures:     # tried again after UNJUDGED_RETRY (jobs.catch_up_waiting), however the judge fares now
+            _store._update_settings(task, lambda s: {**s, "unjudged_since": timezone.now().isoformat()})
+        if (failures and not down) or _store.latest(task).version != qcr.version:
+            # a passing hiccup: try those few again now; or the rules changed while this round ran (an edit
+            # or a learn run meanwhile), and its re-judge came before these outputs were saved
+            _jobs.run_rejudge(task, task.owner)
     except MiniMeTask.DoesNotExist:
         _jobs._finish(job, {"skipped": "the task was deleted"})     # deleted while this job ran: nothing to do
     except Exception as exc:  # noqa: BLE001

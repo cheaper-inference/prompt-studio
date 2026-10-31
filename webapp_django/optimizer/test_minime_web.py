@@ -133,7 +133,8 @@ class MiniMeV2Tests(TestCase):
         self.assertIn('blind', nxt)
         blind = task.labels.filter(split='heldout').first()
         MiniMeLabel.objects.filter(task=task).exclude(pk=blind.pk).update(passed=True)
-        self.assertEqual(mm.next_candidate(task), {'id': blind.pk, 'input': blind.input, 'output': blind.output, 'blind': True})
+        self.assertEqual(mm.next_candidate(task), {'id': blind.pk, 'input': blind.input, 'output': blind.output, 'blind': True,
+                                                    'unjudged': False})
 
     def test_rounds_grow_an_input_pool_and_blind_checks_use_unseen_inputs(self):
         _, task = self.create()
@@ -325,6 +326,70 @@ class MiniMeV2Tests(TestCase):
         with patch.object(mm.judging, '_verdicts', counting):
             self.round(task)
         self.assertEqual(saved, [0, mm.PARALLEL])           # the first batch was reviewable before the second was judged
+
+    def run_round_with(self, task, make_judge):
+        j = job()
+        llm = lambda payload: (stub_llm(payload)[0], make_judge, None, 'stub-judge')
+        with patch.object(mm.judging, 'llm', llm), patch.object(mm.judging._config, 'JUDGE_RETRY_PAUSE', 0):
+            mm.run_round(j, {'task_id': str(task.id), '_owner': 'ahmet'})
+        self.assertEqual(j.status, 'done', j.error)
+        return j
+
+    def test_round_keeps_going_past_an_output_the_judge_cannot_answer(self):
+        _, task = self.create(deployed_prompt='Keywords for {{input}}')
+        def flaky(texts, receive):          # times out on every output that uses 'first', answers the rest
+            ok = judge_fn(texts, receive)
+            def call(inputs=None, outputs=None):
+                if 'first' in outputs:
+                    raise RuntimeError('Request timed out.')
+                return ok(inputs=inputs, outputs=outputs)
+            return call
+        JobState.objects.all().delete()
+        j = self.run_round_with(task, flaky)
+        labels = list(task.labels.all())
+        missed = [l for l in labels if 'first' in l.output]
+        self.assertTrue(0 < len(missed) < len(labels))
+        self.assertEqual({l.judged_pass for l in missed}, {None})                        # kept, without a verdict
+        self.assertNotIn(None, {l.judged_pass for l in labels if l not in missed})       # the others judged
+        self.assertEqual((j.result['candidates'], j.result['unjudged'], j.result['judge_down']), (len(labels), len(missed), False))
+        task.refresh_from_db()
+        self.assertIn(f'could not judge {len(missed)} of them (; RuntimeError: Request timed out.)', mm.summary(task)['log'][0]['text'])
+        self.assertTrue(JobState.objects.filter(kind='minime_learn', payload__rejudge_only=True).exists())   # tried again soon
+        # The re-judge skips what still fails and stops instead of looping; the rest stay judged.
+        failures = []
+        self.assertEqual(mm.rejudge_waiting(task, mm.current_qcr(task), flaky, None, failures=failures), 0)
+        self.assertEqual({row_id for row_id, _ in failures} <= {str(l.pk) for l in missed}, True)
+        self.assertEqual(task.labels.filter(judged_pass=None).count(), len(missed))
+
+    def test_round_stops_calling_a_judge_that_is_down(self):
+        _, task = self.create(deployed_prompt='Keywords for {{input}}')
+        def down(texts, receive):
+            def call(inputs=None, outputs=None):
+                raise RuntimeError('Request timed out.')
+            return call
+        batches, real = [], mm.judging._verdicts
+        def counting(*a, **k):
+            batches.append(len(a[1]))
+            return real(*a, **k)
+        JobState.objects.all().delete()
+        with patch.object(mm.judging, '_verdicts', counting):
+            j = self.run_round_with(task, down)
+        labels = list(task.labels.all())
+        self.assertGreater(len(labels), mm.PARALLEL)
+        self.assertEqual(batches, [mm.PARALLEL])                       # only the first batch waited on the judge
+        self.assertEqual({l.judged_pass for l in labels}, {None})      # every output kept
+        self.assertEqual((j.result['unjudged'], j.result['judge_down']), (len(labels), True))
+        task.refresh_from_db()
+        self.assertIn('the judge is not answering', mm.summary(task)['log'][0]['text'])
+        self.assertFalse(JobState.objects.filter(kind='minime_learn').exists())   # no re-judge into a dead judge now
+        self.assertIn('unjudged_since', task.settings)                            # but one after UNJUDGED_RETRY
+        shown = mm.next_candidate(task)
+        self.assertEqual((shown['blind'], shown['unjudged']), (True, labels[0].split != 'heldout'))
+        self.assertNotIn('judged_pass', shown)
+        batches.clear()                                                # a re-judge into a dead judge stops too
+        with patch.object(mm.judging, '_verdicts', counting), patch.object(mm.judging._config, 'JUDGE_RETRY_PAUSE', 0):
+            self.assertEqual(mm.rejudge_waiting(task, mm.current_qcr(task), down, None), 0)
+        self.assertEqual(batches, [mm.PARALLEL])
 
     def test_learn_applies_the_pick_even_when_it_breaks_a_reviewed_answer(self):
         task, j, _ = self.learn_with("1. 3 keywords in total.\n2. Each keyword must not use the word 'walk-in'.\n3. " + RULE)
@@ -564,25 +629,22 @@ class MiniMeV2Tests(TestCase):
         mm.delete_task(other)
         self.assertEqual(JobState.objects.filter(payload__task_id=str(other.id)).exclude(status='cancelled').count(), 0)
 
-    def test_feedback_alone_is_read_as_agreeing_or_not(self):
+    def test_shown_verdict_takes_the_same_pass_fail_as_a_hidden_one(self):
         _, task = self.create()
         url = lambda l: f'/api/minime/tasks/{task.id}/labels/{l.pk}'
         a = MiniMeLabel.objects.create(task=task, input='i', output=FIRST, judged_pass=False, judged_version=0)
         b = MiniMeLabel.objects.create(task=task, input='i', output=GOOD, judged_pass=False, judged_version=0)
-        with patch.object(mm.tasks, 'interpret_feedback', lambda task, label, seen, c: 'fine' not in c):
-            self.assertEqual(self.post(url(a), {'action': 'comment', 'reason': ' '}).status_code, 400)
-            self.post(url(a), {'action': 'comment', 'reason': 'right, it uses first', 'shown_pass': False})
-            self.post(url(b), {'action': 'comment', 'reason': 'this one is fine', 'shown_pass': False})
-        a.refresh_from_db(); b.refresh_from_db()
-        self.assertEqual((a.passed, a.action, a.reason), (False, 'keep', 'right, it uses first'))   # agrees: kept, a note
-        self.assertEqual((b.passed, b.action), (True, 'flip'))                                       # disagrees: flipped
-        def boom(*args):
-            raise RuntimeError('endpoint down')
-        c = MiniMeLabel.objects.create(task=task, input='i', output=GOOD, judged_pass=False, judged_version=0)
-        with patch.object(mm.tasks, 'interpret_feedback', boom):
-            r = self.post(url(c), {'action': 'comment', 'reason': 'hmm'})
-        self.assertEqual(r.status_code, 400)
-        self.assertIn('could not read your feedback', r.json()['error'])
+        c = MiniMeLabel.objects.create(task=task, input='i', output=GOOD, judged_pass=True, judged_version=0)
+        self.post(url(a), {'action': 'label', 'verdict': 'Fail', 'reason': 'right, but not for the length', 'shown_pass': False})
+        self.post(url(b), {'action': 'label', 'verdict': 'Pass', 'shown_pass': False})       # a comment is optional
+        self.post(url(c), {'action': 'label', 'verdict': 'Pass', 'shown_pass': False})       # re-judged to PASS while on screen
+        for l in (a, b, c):
+            l.refresh_from_db()
+        self.assertEqual((a.passed, a.action, a.reason), (False, 'keep', 'right, but not for the length'))   # same as MiniMe: kept, a note
+        self.assertEqual((b.passed, b.action, b.reason), (True, 'flip', ''))                                 # differs: flipped
+        self.assertEqual((c.passed, c.action), (True, 'flip'))      # against the verdict the user saw, not the stored one
+        self.assertEqual(self.post(url(a), {'action': 'comment', 'reason': 'hmm'}).status_code, 400)   # no guessed verdicts
+        self.assertEqual(self.post(url(a), {'action': 'label', 'verdict': 'maybe'}).status_code, 400)
 
     def test_a_gepa_run_resumes_from_its_checkpoint_with_more_feedback(self):
         import os, tempfile
@@ -688,6 +750,214 @@ class MiniMeV2Tests(TestCase):
         with patch.object(mm.learning, 'reflect_once', coach):                        # little evidence, nothing traded: no tip
             mm._coach(SimpleNamespace(status='done', result={'accepted': True}), {'task_id': str(task.id), '_owner': 'ahmet'})
         self.assertEqual(len(prompts), 1)
+
+    def test_coach_reply_pairs_each_tip_with_the_rule_it_suggests(self):
+        self.assertEqual(mm.coach_reply('- Say which word is off.\n- "Punchy" should be a rule.\nRULE: "Each keyword is at most 3 words."\n- third'),
+                         (['Say which word is off.', '"Punchy" should be a rule.'], [None, 'Each keyword is at most 3 words.']))
+        self.assertEqual(mm.coach_reply('- Name the rule.\n**Rule:** Keywords never repeat a word.'),
+                         (['Name the rule.'], ['Keywords never repeat a word.']))
+        self.assertEqual(mm.coach_reply('RULE: orphan\n- A tip.'), (['A tip.'], [None]))   # a rule before any tip is ignored
+        self.assertEqual(mm.coach_reply('- A tip.\nRULE: The answer must not include "free"')[1],
+                         ['The answer must not include "free"'])     # a quoted term at the end keeps its quotes
+        self.assertEqual(mm.coach_reply('- A tip.\nRULE: “Never repeat a word.”')[1], ['Never repeat a word.'])
+        self.assertEqual(mm.coach_reply('NONE'), ([], []))
+
+    def test_add_rule_from_a_tip(self):
+        _, task = self.create()
+        for n in range(3):
+            l = MiniMeLabel.objects.create(task=task, input='i', output=FIRST, judged_pass=False, judged_version=0)
+            mm.review(task, l.pk, 'flip', reason='first is off-putting')
+        rule = "Each keyword must not use the word 'first'."
+        coach = lambda payload, prompt: f"- Turn 'off-putting' into a rule.\nRULE: {rule}\n- Keep commenting."
+        j = SimpleNamespace(status='done', result={'accepted': False, 'edits': [{'op': 'add'}], 'fixed': [], 'broke': ['2']})
+        with patch.object(mm.learning, 'reflect_once', coach):
+            mm._coach(j, {'task_id': str(task.id), '_owner': 'ahmet'})
+        task.refresh_from_db()
+        tip = next(e for e in mm.summary(task)['log'] if e.get('kind') == 'tip')
+        self.assertEqual(tip['rules'], [rule, None])
+        before = mm.summary(task)['version']
+        JobState.objects.all().delete()
+        url = f'/api/minime/tasks/{task.id}/tip'
+        r = self.post(url, {'at': tip['at'], 'add': 0})
+        self.assertEqual(r.status_code, 200, r.content)
+        s = r.json()
+        self.assertEqual(s['version'], before + 1)
+        self.assertEqual(s['statements'][-1]['text'], rule)
+        self.assertEqual(next(e for e in s['log'] if e.get('kind') == 'tip')['added'], [0])
+        self.assertIn("You added MiniMe's suggested rule", s['log'][0]['text'])
+        self.assertTrue(JobState.objects.filter(kind='minime_learn', payload__rejudge_only=True).exists())   # re-judged with it
+        self.assertEqual(self.post(url, {'at': tip['at'], 'add': 0}).status_code, 400)    # added once
+        self.assertEqual(self.post(url, {'at': tip['at'], 'add': 1}).status_code, 400)    # that tip suggests no rule
+        self.assertFalse(next(e for e in self.client.get(f'/api/minime/tasks/{task.id}').json()['log']
+                              if e.get('kind') == 'tip').get('dismissed'))                 # adding is not dismissing
+
+    def test_a_judge_change_stops_a_running_search_instead_of_deleting_its_checkpoint(self):
+        import os, tempfile
+        _, task = self.create()
+        folder = tempfile.mkdtemp()
+        run = {'id': 'r1', 'based_on': 0, 'pareto_ids': [], 'run_dir': folder}
+        mm.store._update_settings(task, lambda s: {**s, 'gepa_run': run})
+        JobState.objects.all().delete()
+        searching = JobState.objects.create(id='searching', owner='ahmet', kind='minime_learn', status='running',
+                                            payload={'task_id': str(task.id), '_owner': 'ahmet'})
+        starting = JobState.objects.create(id='starting', owner='ahmet', kind='minime_learn', status='running',   # opening the new epoch
+                                           payload={'task_id': str(task.id), '_owner': 'ahmet'})
+        mm.store._update_settings(task, lambda s: {**s, 'gepa_run': {**run, 'job': str(searching.id)}})
+        task.refresh_from_db()
+        import optimizer.durable as durable
+        real_cancel, seen = durable.cancel, []
+        def cancel(job_id, owner):      # the worker must find its run retired as soon as it can see the cancellation
+            seen.append('gepa_run' in (MiniMeTask.objects.get(pk=task.pk).settings or {}))
+            return real_cancel(job_id, owner)
+        with patch.object(durable, 'cancel', cancel):
+            mm.scoring._judge_epoch(task)
+        self.assertEqual(seen, [False])
+        starting.refresh_from_db()
+        self.assertIsNone(starting.cancel_requested_at)          # only the job searching in the checkpoint is stopped
+        searching.refresh_from_db()
+        self.assertTrue(os.path.isdir(folder))                  # GEPA can still write its next checkpoint
+        self.assertIsNotNone(searching.cancel_requested_at)     # and stops at its next iteration
+        task.refresh_from_db()
+        self.assertNotIn('gepa_run', task.settings)             # never resumed: its scores are the old judge's
+        self.assertTrue(mm.learning._retired(task, run))
+        self.assertIn('rewrite in progress was stopped', mm.summary(task)['log'][0]['text'])
+        mm.learning._end_gepa_run(task, run)                    # a search that finished anyway removes its own folder
+        self.assertFalse(os.path.isdir(folder))
+        # With no search running, the checkpoint is deleted at once, as before.
+        folder = tempfile.mkdtemp()
+        mm.store._update_settings(task, lambda s: {**s, 'gepa_run': {**run, 'id': 'r2', 'run_dir': folder, 'job': str(searching.id)}})
+        searching.status = 'done'; searching.save()
+        task.refresh_from_db()
+        mm.scoring._judge_epoch(task)
+        self.assertFalse(os.path.isdir(folder))
+
+    def test_a_retired_checkpoint_is_dropped_when_the_search_is_cancelled_mid_call(self):
+        import os
+        from optimizer.durable import JobCancelled
+        _, task = self.create()
+        for n in range(5):
+            l = MiniMeLabel.objects.create(task=task, input='i', output=FIRST, judged_pass=True, judged_version=0)
+            mm.review(task, l.pk, 'flip', reason='uses first')
+        made = []
+        def cancelled_by_a_judge_change(*a, run_dir=None, **k):
+            os.makedirs(run_dir); made.append(run_dir)                       # GEPA has checkpointed
+            mm.store._update_settings(task, lambda s: {x: v for x, v in s.items() if x != 'gepa_run'})   # the judge changed
+            raise JobCancelled('cancelled')                                  # raised by a progress write
+        with patch.object(mm.judging, 'llm', stub_llm), patch.object(mm.learning, 'run_gepa', cancelled_by_a_judge_change):
+            try:
+                mm.run_learn(job(), {'task_id': str(task.id), '_owner': 'ahmet'})
+            except JobCancelled:
+                pass
+        self.assertEqual(len(made), 1)
+        self.assertFalse(os.path.isdir(made[0]))
+
+    def test_unjudged_learn_reviews_count_as_feedback(self):
+        _, task = self.create()
+        unjudged = MiniMeLabel.objects.create(task=task, source='generated', input='i', output=FIRST)   # the judge could not answer it
+        before = mm.store.feedback_since_learn(task)
+        mm.review(task, unjudged.pk, 'label', verdict='Fail', reason='uses first')
+        self.assertEqual(mm.store.feedback_since_learn(task), before + 1)
+        row = next(r for r in mm.store.confirmed(task) if r['id'] == str(unjudged.pk))
+        self.assertTrue(row['note'])                                                       # its comment is enforced too
+        blind = MiniMeLabel.objects.create(task=task, source='generated', split='heldout', input='i', output=FIRST, judged_pass=True)
+        mm.review(task, blind.pk, 'label', verdict='Fail', reason='uses first')
+        self.assertEqual(mm.store.feedback_since_learn(task), before + 1)                  # blind checks stay out
+
+    def test_a_card_shown_hidden_stays_a_hidden_review_after_a_late_verdict(self):
+        _, task = self.create()
+        l = MiniMeLabel.objects.create(task=task, source='generated', input='i', output=FIRST)   # unjudged when shown
+        l.judged_pass, l.judged_version = False, 0                                              # judged while you typed
+        l.save()
+        before = mm.store.feedback_since_learn(task)
+        r = self.post(f'/api/minime/tasks/{task.id}/labels/{l.pk}', {'action': 'label', 'verdict': 'Fail', 'shown_pass': None})
+        self.assertEqual(r.status_code, 200, r.content)
+        l.refresh_from_db()
+        self.assertEqual((l.passed, l.action), (False, ''))                 # not a "keep" of a verdict never seen
+        self.assertEqual(mm.store.feedback_since_learn(task), before + 1)   # a bare Fail still counts
+        m = MiniMeLabel.objects.create(task=task, source='generated', input='i', output=FIRST, judged_pass=False, judged_version=0)
+        self.post(f'/api/minime/tasks/{task.id}/labels/{m.pk}', {'action': 'label', 'verdict': 'Fail'})   # no shown_pass sent
+        m.refresh_from_db()
+        self.assertEqual(m.action, 'keep')                                  # the stored verdict is the fallback
+
+    def test_outputs_left_unjudged_are_tried_again_after_a_pause(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        _, task = self.create()
+        MiniMeLabel.objects.create(task=task, source='generated', input='i', output=FIRST)    # the judge could not answer
+        JobState.objects.all().delete()
+        def since(seconds):
+            at = (timezone.now() - timedelta(seconds=seconds)).isoformat()
+            mm.store._update_settings(task, lambda s: {**s, 'unjudged_since': at})
+        rejudges = lambda: JobState.objects.filter(kind='minime_learn', payload__rejudge_only=True).count()
+        since(10)
+        self.client.get(f'/api/minime/tasks/{task.id}/queue')
+        self.assertEqual(rejudges(), 0)                                  # not while the judge may still be down
+        since(mm.UNJUDGED_RETRY + 1)
+        self.client.get(f'/api/minime/tasks/{task.id}/queue')
+        self.assertEqual(rejudges(), 1)                                  # after the pause: once
+        self.client.get(f'/api/minime/tasks/{task.id}/queue')
+        self.assertEqual(rejudges(), 1)                                  # the pause starts again
+        task.labels.update(judged_pass=True, judged_version=0, judged_at=timezone.now())   # judged at last
+        mm.catch_up_waiting(task, 'ahmet')
+        task.refresh_from_db()
+        self.assertNotIn('unjudged_since', task.settings)
+
+    def test_a_round_that_outlives_a_rules_change_queues_a_rejudge(self):
+        """Production, SEM keywords: round 10 started on v7, the user edited to v8 and v9 (each re-judge
+        ran before the round saved), and the round's outputs stayed judged with v7."""
+        _, task = self.create(deployed_prompt='Keywords for {{input}}')
+        real, edited = mm.judging._verdicts, []
+        def edit_meanwhile(qcr, *a, **k):
+            if not edited:                                   # the user edits the rules while the round judges
+                current = mm.current_qcr(task)
+                mm.edit_qcr(task, [{'id': x.id, 'text': x.text, 'status': x.status} for x in current.statements]
+                            + [{'text': RULE}])
+                edited.append(True)
+            return real(qcr, *a, **k)
+        JobState.objects.all().delete()
+        with patch.object(mm.judging, '_verdicts', edit_meanwhile):
+            self.round(task)
+        latest = mm.store.latest(task).version
+        self.assertTrue(task.labels.filter(passed=None).exclude(judged_version=latest).exists())   # saved stale
+        self.assertTrue(JobState.objects.filter(kind='minime_learn', payload__rejudge_only=True).exists())  # caught up
+
+    def test_waiting_outputs_judged_with_older_rules_are_caught_up(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        _, task = self.create()
+        MiniMeLabel.objects.create(task=task, source='generated', input='i', output=FIRST, judged_pass=True,
+                                   judged_version=0, judged_at=timezone.now())
+        current = mm.current_qcr(task)
+        mm.edit_qcr(task, [{'id': x.id, 'text': x.text, 'status': x.status} for x in current.statements] + [{'text': RULE}])
+        JobState.objects.all().delete()                                   # the edit's own re-judge was lost (a deploy)
+        rejudges = lambda: JobState.objects.filter(kind='minime_learn', payload__rejudge_only=True).count()
+        queue = lambda: self.client.get(f'/api/minime/tasks/{task.id}/queue')
+        queue()
+        self.assertEqual(rejudges(), 1)                                   # the next poll catches up
+        queue()
+        self.assertEqual(rejudges(), 1)                                   # not while it is queued
+        JobState.objects.all().delete()
+        queue()
+        self.assertEqual(rejudges(), 0)                                   # nor again within WAITING_RECHECK
+        at = (timezone.now() - timedelta(seconds=mm.WAITING_RECHECK + 1)).isoformat()
+        mm.store._update_settings(task, lambda s: {**s, 'caught_up_at': at})
+        queue()
+        self.assertEqual(rejudges(), 1)
+        JobState.objects.all().delete()
+        mm.store._update_settings(task, lambda s: {**s, 'caught_up_at': at, 'optimizing': False})
+        queue()
+        self.assertEqual(rejudges(), 0)                                   # paused: Start optimizing catches up
+
+    def test_an_answer_without_a_usable_verdict_counts_as_a_failure(self):
+        _, task = self.create()
+        rows = [{'id': str(n), 'input': 'i', 'output': GOOD} for n in range(mm.PARALLEL)]
+        absorbed = lambda qcr, rs, *a, **k: [{'id': r['id'], 'predicted': None, 'statements': {}, 'criteria': []} for r in rs]
+        failures = []
+        with patch.object(mm.judging, 'judge_rows', absorbed):
+            out = mm.judging._verdicts(mm.current_qcr(task), rows, judge_fn, None, failures=failures)
+        self.assertEqual(sorted(i for i, _ in failures), sorted(r['id'] for r in rows))
+        self.assertTrue(mm.judging.judge_down(rows, failures))              # a wholly malformed batch: the judge is down
+        self.assertEqual({v for v, _ in out.values()}, {None})
 
     def test_a_transient_judge_failure_is_retried(self):
         import json as _json
@@ -895,9 +1165,9 @@ class MiniMeV2Tests(TestCase):
         """#11: cut off between the two, the result or the resumable search survives."""
         seen = []
         real = mm.learning._end_gepa_run
-        def spy(task):
+        def spy(task, mine=None):
             seen.append(bool((MiniMeTask.objects.get(pk=task.pk).settings or {}).get('pending_rewrite')))
-            real(task)
+            real(task, mine)
         with patch.object(mm.learning, '_end_gepa_run', spy):
             self.learn_with('x')                 # any GEPA result; it is saved, then checked
         self.assertEqual(seen[:1], [True])

@@ -280,9 +280,14 @@ def _payload(task, payload):
             "rewriter_model": payload.get("rewriter_model") or s.get("rewriter_model") or _config.REWRITER_MODEL}
 
 
-def _verdicts(qcr, rows, make_judge, make_item_judge, progress=None):
+def _verdicts(qcr, rows, make_judge, make_item_judge, progress=None, failures=None):
     """{row id: (predicted, [{id, text} failed])}, judging PARALLEL rows at once.
-    progress(done, total) before each batch."""
+    progress(done, total) before each batch.
+
+    failures: None, and the first row the judge could not answer (after its retries) raises. A list,
+    and such a row gets no verdict (None, []) and its (row id, exception) is appended: the others
+    are still judged. A row judged without a usable verdict (predicted None: an evaluation error
+    judge_rows absorbed) is appended too."""
     from ps_utils.rubric_checks import _run_concurrently
     texts = {s.id: s.text for s in qcr.statements}
     results = {}
@@ -293,9 +298,16 @@ def _verdicts(qcr, rows, make_judge, make_item_judge, progress=None):
         def judge(row):
             return lambda: results.__setitem__(row["id"], judge_rows(qcr, [row], make_judge, make_item_judge)[0])
         errors = _run_concurrently([judge(row) for row in batch])
-        failed = next((e for e in errors if e is not None), None)
-        if failed is not None:
-            raise failed
+        for row, error in zip(batch, errors):
+            if error is None:
+                continue
+            if failures is None:
+                raise error
+            failures.append((row["id"], error))
+            results[row["id"]] = {"predicted": None, "statements": {}}
+        if failures is not None:
+            failures += [(row["id"], RuntimeError("the judge gave no usable verdict")) for row, error in zip(batch, errors)
+                         if error is None and results[row["id"]]["predicted"] is None]
     out = {}
     for row in rows:
         r = results[row["id"]]
@@ -369,14 +381,31 @@ def configured_at(payload):
     return datetime.fromisoformat(at) if at else timezone.now()
 
 
-def rejudge_waiting(task, qcr, make_judge, make_item_judge, job=None, configured=None) -> int:
+def judge_down(batch, failures) -> bool:
+    """No row of this batch could be judged: the judge is unavailable, so calling it for the next
+    batches would only wait out the same timeouts."""
+    return bool(batch) and len({row_id for row_id, _ in failures} & {r["id"] for r in batch}) == len(batch)
+
+
+def failure_text(failures) -> str:
+    """'APITimeoutError: Request timed out.' for the first failure, short enough for a log line."""
+    error = failures[0][1]
+    return f"{type(error).__name__}: {error}"[:200]
+
+
+def rejudge_waiting(task, qcr, make_judge, make_item_judge, job=None, configured=None, failures=None) -> int:
     """Waiting outputs judged again with these rules, in review order (the one on screen first), and
     saved batch by batch, so the page shows the new verdict as soon as it exists.
 
     configured: when this judge was read from the settings (configured_at). Every verdict is stamped
     with it, and the run stops at the first batch after a judge change: a later timestamp would make
-    the old judge's verdicts look current. Returns how many were judged."""
+    the old judge's verdicts look current. Returns how many were judged.
+
+    An output the judge cannot answer keeps its old state (still waiting to be judged) and is added to
+    failures, if given; the rest are judged. A batch with no answer at all means the judge is down:
+    the run stops there."""
     configured = configured or timezone.now()
+    failures = [] if failures is None else failures
     waiting = stale_waiting(task, qcr.version)
     judged = 0
     for start in range(0, len(waiting), _config.PARALLEL):
@@ -386,13 +415,18 @@ def rejudge_waiting(task, qcr, make_judge, make_item_judge, job=None, configured
         if since and since > configured:      # the judge changed: this one is obsolete
             break
         batch = waiting[start:start + _config.PARALLEL]
-        verdicts = _verdicts(qcr, [{"id": str(l.pk), "input": l.input, "output": l.output} for l in batch],
-                             make_judge, make_item_judge)
-        for l in batch:
+        rows = [{"id": str(l.pk), "input": l.input, "output": l.output} for l in batch]
+        before = len(failures)
+        verdicts = _verdicts(qcr, rows, make_judge, make_item_judge, failures=failures)
+        missed = {row_id for row_id, _ in failures[before:]}
+        answered = [l for l in batch if str(l.pk) not in missed]
+        for l in answered:
             l.judged_pass, l.judged_failed = verdicts[str(l.pk)]
             l.judged_version, l.judged_at = qcr.version, configured
-        MiniMeLabel.objects.bulk_update(batch, ["judged_pass", "judged_failed", "judged_version", "judged_at"])
-        judged += len(batch)
+        MiniMeLabel.objects.bulk_update(answered, ["judged_pass", "judged_failed", "judged_version", "judged_at"])
+        judged += len(answered)
+        if judge_down(rows, failures[before:]):
+            break
     return judged
 
 
@@ -432,4 +466,4 @@ def _right(row, verdict, failed, check) -> bool:
     return not row["note"] or check(row["output"], assessment(verdict, failed), row["reason"])
 
 
-__minime_names__ = ('CLOCK', 'JUDGE_TIMES', '_Clock', '_JudgeStore', '_cached', '_current_verdicts', '_judge_cache_path', '_judge_client', '_judge_line', '_judge_retry_line', '_judge_speed', 'data_dir', '_mins', '_payload', '_reuse_verdicts', '_right', '_verdicts', 'assessment', 'configured_at', 'llm', 'note_checker', 'rejudge_waiting', 'stale_waiting',)
+__minime_names__ = ('CLOCK', 'JUDGE_TIMES', '_Clock', '_JudgeStore', '_cached', '_current_verdicts', '_judge_cache_path', '_judge_client', '_judge_line', '_judge_retry_line', '_judge_speed', '_mins', '_payload', '_reuse_verdicts', '_right', '_verdicts', 'assessment', 'configured_at', 'data_dir', 'failure_text', 'judge_down', 'llm', 'note_checker', 'rejudge_waiting', 'stale_waiting',)

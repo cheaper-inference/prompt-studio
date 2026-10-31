@@ -105,6 +105,9 @@ def render(check, unit):
             f'Output only the {_plural(unit)}, one per line.'
     if kind == 'list_style':
         return f"Present the {_plural(unit)} as a {check['markers']} list."
+    if kind == 'unquoted':
+        which = {'double': 'double ', 'single': 'single '}.get(check.get('quotes'), '')
+        return f'The answer must not be wrapped in {which}quotation marks.'
     raise ValueError(f'Unknown check kind {kind!r}')
 
 

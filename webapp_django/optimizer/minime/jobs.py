@@ -152,6 +152,34 @@ def autostart(task, owner) -> list:
     return started
 
 
+def catch_up_waiting(task, owner):
+    """Re-judge waiting outputs whose verdict is not current (judged with older rules or another judge,
+    or not judged at all), whichever path left them behind: a round that saved after the rules changed,
+    a re-judge cut off by a deploy, a judge outage. Only while optimizing and with no learn job queued or
+    running (a re-judge or learn run judges them itself); at most once per WAITING_RECHECK; and after a
+    judge failure (unjudged_since) not before UNJUDGED_RETRY has passed, so a judge that is down is not
+    called every few seconds. The failure record is cleared once nothing is behind."""
+    from datetime import datetime
+    if not optimizing(task):
+        return None
+    s = task.settings or {}
+    if not _judging.stale_waiting(task, _store.latest(task).version):
+        if s.get("unjudged_since"):
+            _store._update_settings(task, lambda x: {k: v for k, v in x.items() if k != "unjudged_since"})
+        return None
+    if any(kind == "minime_learn" for kind, _ in active_job_rows(task)):
+        return None
+    now = timezone.now()
+    since = lambda key: (now - datetime.fromisoformat(s[key])).total_seconds() if s.get(key) else None
+    if since("unjudged_since") is not None and since("unjudged_since") < _config.UNJUDGED_RETRY:
+        return None
+    if since("caught_up_at") is not None and since("caught_up_at") < _config.WAITING_RECHECK:
+        return None
+    _store._update_settings(task, lambda x: {**x, "caught_up_at": now.isoformat(),
+                                             **({"unjudged_since": now.isoformat()} if x.get("unjudged_since") else {})})
+    return run_rejudge(task, owner)
+
+
 # --------------------------------------------------------------------------- jobs
 def _variant(payload) -> str:
     p = payload or {}
@@ -233,4 +261,4 @@ def run_rejudge(task, owner):
     return start("minime_learn", owner, {"task_id": str(task.id), "rejudge_only": True})
 
 
-__minime_names__ = ('_after_job', '_cancel_requested', '_finish', '_plain_error', '_stage', '_stopped', '_variant', 'active_job_rows', 'active_jobs', 'autostart', 'ensure_scored', 'failed_jobs', 'optimizing', 'pause_if_ready', 'pause_task', 'run_rejudge', 'start', 'start_optimizing', 'stop_jobs',)
+__minime_names__ = ('_after_job', '_cancel_requested', '_finish', '_plain_error', '_stage', '_stopped', '_variant', 'active_job_rows', 'active_jobs', 'autostart', 'catch_up_waiting', 'ensure_scored', 'failed_jobs', 'optimizing', 'pause_if_ready', 'pause_task', 'run_rejudge', 'start', 'start_optimizing', 'stop_jobs',)

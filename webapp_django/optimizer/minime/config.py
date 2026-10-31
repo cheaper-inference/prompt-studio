@@ -130,25 +130,13 @@ READY_FLIPS = 1
 DESCRIPTION_FIELDS = tuple(k for k in TASK_FIELDS if k != "requirements")   # the statements own the requirements
 
 
-INTERPRET = """A reviewer read an answer and the verdict an automatic judge gave it, then wrote feedback.
-
-Answer:
-{output}
-
-The judge said: {said}
-
-The reviewer's feedback: {comment}
-
-Does the reviewer, on balance, accept the judge's verdict ({verdict})? Reservations about the reasons,
-or praise, can go either way; decide whether they would keep {verdict} or change it.
-Reply with KEEP or CHANGE only."""
-
-
 JUDGE_RETRIES = 2
 
 
 JUDGE_TIMEOUT = 120         # seconds per judge attempt (normal calls: 5-15 s, slowest seen 99 s)
 JUDGE_RETRY_PAUSE = 3       # seconds, growing per attempt
+UNJUDGED_RETRY = 300      # seconds before outputs the judge could not answer are tried again
+WAITING_RECHECK = 30      # seconds between catch-up re-judges of waiting outputs whose verdict is not current
 
 
 NOTE_CHECK = """A reviewer read how a judge assessed an answer, agreed with the verdict, and left a comment.
@@ -191,7 +179,10 @@ Tips already given (do not repeat them):
 Give the person at most 2 short, concrete tips on how to give feedback that teaches the judge faster,
 grounded in the facts above: e.g. comments that only give a verdict, vague taste words that should become
 checkable rules, or rules the judge keeps getting wrong. One line each, starting with "- ", addressed to
-the person, plain language, no preamble. If nothing useful stands out, reply with NONE."""
+the person, plain language, no preamble. When a tip is that something should become a rule (a taste word,
+a complaint that keeps coming back) and the judge has no such rule yet, put the rule itself on the next line
+as "RULE: <one sentence, phrased like the judge's rules above>", ready to add as is.
+If nothing useful stands out, reply with NONE."""
 
 
-__minime_names__ = ('BLIND_CYCLE', 'BLIND_SHARE', 'COACH_MIN_REVIEWS', 'COACH_PROMPT', 'COMPLY_SHARE', 'DESCRIPTION_FIELDS', 'DIRECT_EXAMPLES', 'DRAFT_MAX', 'GEN_MAX_TOKENS', 'GEPA_EVAL_PARALLEL', 'GEPA_EVERY', 'GEPA_MIN_EACH', 'GEPA_MIN_FEEDBACK', 'GEPA_MIN_REVIEWS', 'INTERPRET', 'JOB_KINDS', 'JUDGE_MODEL', 'JUDGE_MODEL_BEFORE', 'JUDGE_RETRIES', 'JUDGE_RETRY_PAUSE', 'JUDGE_TIMEOUT', 'LEARN_BUDGET', 'LEARN_EVERY', 'LEARN_EVERY_EARLY', 'LOG_SIZE', 'LOW_QUEUE', 'MAX_EDITS_EARLY', 'MINIBATCH', 'MiniMeError', 'NOTE_CHECK', 'PARALLEL', 'PARETO_SHARE', 'PARETO_SIZE', 'POOL_GROWTH', 'POOL_MAX', 'PROPOSALS', 'QUALITY_MIN', 'QUALITY_WINDOW', 'RANDOM_SHARE', 'READY_AGREE', 'READY_BLIND', 'READY_EACH', 'READY_FLIPS', 'READY_STABLE', 'REWRITER_MAX_TOKENS', 'REWRITER_MODEL', 'REWRITER_TIMEOUT', 'ROUND_SIZE', 'SCORE_RETRY', 'TASK_MODEL',)
+__minime_names__ = ('BLIND_CYCLE', 'BLIND_SHARE', 'COACH_MIN_REVIEWS', 'COACH_PROMPT', 'COMPLY_SHARE', 'DESCRIPTION_FIELDS', 'DIRECT_EXAMPLES', 'DRAFT_MAX', 'GEN_MAX_TOKENS', 'GEPA_EVAL_PARALLEL', 'GEPA_EVERY', 'GEPA_MIN_EACH', 'GEPA_MIN_FEEDBACK', 'GEPA_MIN_REVIEWS', 'JOB_KINDS', 'JUDGE_MODEL', 'JUDGE_MODEL_BEFORE', 'JUDGE_RETRIES', 'JUDGE_RETRY_PAUSE', 'JUDGE_TIMEOUT', 'LEARN_BUDGET', 'LEARN_EVERY', 'LEARN_EVERY_EARLY', 'LOG_SIZE', 'LOW_QUEUE', 'MAX_EDITS_EARLY', 'MINIBATCH', 'MiniMeError', 'NOTE_CHECK', 'PARALLEL', 'PARETO_SHARE', 'PARETO_SIZE', 'POOL_GROWTH', 'POOL_MAX', 'PROPOSALS', 'QUALITY_MIN', 'QUALITY_WINDOW', 'RANDOM_SHARE', 'READY_AGREE', 'READY_BLIND', 'READY_EACH', 'READY_FLIPS', 'READY_STABLE', 'REWRITER_MAX_TOKENS', 'REWRITER_MODEL', 'REWRITER_TIMEOUT', 'ROUND_SIZE', 'SCORE_RETRY', 'TASK_MODEL', 'UNJUDGED_RETRY', 'WAITING_RECHECK',)

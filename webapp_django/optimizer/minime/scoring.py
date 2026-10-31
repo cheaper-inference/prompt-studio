@@ -83,14 +83,30 @@ def _judge_epoch(task):
     import shutil
     now = timezone.now()
     # A GEPA checkpoint and a saved rewrite hold the old judge's scores: dropped, so the next run
-    # searches again with this judge instead of mixing the two.
+    # searches again with this judge instead of mixing the two. A search still running in that
+    # checkpoint (the job the run names as searching in it) is asked to stop instead: deleting its
+    # folder under it fails its next checkpoint write, and it removes the folder itself when it ends.
+    # Any other job, such as a learn job starting up and opening this epoch, is left alone.
+    # The checkpoint is retired and the search cancelled in one transaction: a worker that sees the
+    # cancellation also sees its run retired, so it drops the folder instead of keeping it as paused.
+    from django.db import transaction
     run = (task.settings or {}).get("gepa_run") or {}
-    if run.get("run_dir"):
-        shutil.rmtree(run["run_dir"], ignore_errors=True)
+    searching = [j for kind, j in _jobs.active_job_rows(task)
+                 if kind == "minime_learn" and j.status == "running" and str(j.id) == str(run.get("job") or "")
+                 ] if run.get("run_dir") else []
     judge = _store.effective_models(task)["judge_model"]     # the judge this epoch is for (see _ensure_judge_epoch)
-    _store._update_settings(task, lambda s: {k: v for k, v in {**s, "judge_since": now.isoformat(), "judge_epoch_model": judge}.items()
-                                             if k not in ("judge_reasoning", "judge_reasoning_since", "no_reasoning_models",
-                                                          "gepa_run", "pending_rewrite")})
+    with transaction.atomic():
+        _store._update_settings(task, lambda s: {k: v for k, v in {**s, "judge_since": now.isoformat(), "judge_epoch_model": judge}.items()
+                                                 if k not in ("judge_reasoning", "judge_reasoning_since", "no_reasoning_models",
+                                                              "gepa_run", "pending_rewrite")})
+        if searching:
+            from ..durable import cancel
+            for j in searching:
+                cancel(j.id, task.owner)
+    if searching:
+        _store.log(task, "The rewrite in progress was stopped: it was scoring rules with the previous judge.", kind="routine")
+    elif run.get("run_dir"):
+        shutil.rmtree(run["run_dir"], ignore_errors=True)
     for v in task.versions.all():
         if (v.report or {}).get("blind"):
             v.report = {k: x for k, x in v.report.items() if k != "blind"}

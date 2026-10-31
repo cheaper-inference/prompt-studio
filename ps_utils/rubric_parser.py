@@ -11,8 +11,8 @@ import re
 
 log = logging.getLogger(__name__)
 
-VERSION = 'rubric-parser-v6'   # v2: judge_scope; v3: item_unit, only_items, lead-in groups; v4: markdown tables;
-                               # v5: more limit phrasings; v6: preserve negations across the full clause
+VERSION = 'rubric-parser-v7'   # v2: judge_scope; v3: item_unit, only_items, lead-in groups; v4: markdown tables;
+                               # v5: more limit phrasings; v6: full-clause negations; v7: wrapping-quote checks
 
 _NUMBERS = {w: str(i) for i, w in enumerate(
     'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen '
@@ -52,7 +52,8 @@ no not than equal or and it its their they them this that these those there answ
 return returns provide provides list lists give gives generate generates write writes produce produces keep use
 uses exactly precisely long length limit limited maximum minimum max min number count up so as for
 please make sure ensure present presented format formatted display exceed exceeding within never
-surpass surpassing beyond above over top go going cannot can don doesn won shouldn mustn t'''.split())
+surpass surpassing beyond above over top go going cannot can don doesn won shouldn mustn t
+whole entire fail fails rule'''.split())
 _PLACEHOLDER = '\x00{}\x00'
 
 
@@ -152,6 +153,21 @@ def _compile_only_items(rest):
     return {'kind': 'only_items', 'markers': markers}, rest
 
 
+# Quotation marks wrapping the whole answer ("Any wrapping quotes FAIL", "without any wrapper quotes",
+# "must not be wrapped in quotation marks"): checked in code, where a judge is unreliable (a quote
+# mark is one character). Only wrapping: "no quotes" alone could mean none anywhere, so it stays
+# with the judge; so does a per-item rule ("each tagline ...").
+_QUOTES = r'(?:(?:double |single )?(?:quotation marks?|quotes?))(?!\w)'
+_WRAP = r'(?:wrap(?:ping|per|pers|ped|s)?|surround(?:ing|ed|s)?|enclos(?:ing|ed|es)|outer)'
+_TARGET = r'(?:the |its )?(?:whole |entire |full )?(?:answer|output|response|reply|text|motto|it)'
+_UNQUOTED = (rf'\b(?:without|no) (?:any )?{_WRAP} {_QUOTES}(?: (?:around|wrapping) {_TARGET})?|'
+             rf'\b(?:any |all )?{_WRAP} {_QUOTES} (?:fail|fails|are not allowed|is not allowed|not allowed|are forbidden|forbidden)\b|'
+             rf"\b(?:must not|should not|may not|cannot|can't|never|not|do not|don't) (?:be )?(?:{_WRAP}|put|placed|presented) "
+             rf'(?:in|with|by|inside|within) (?:any )?{_QUOTES}|'
+             rf"\b(?:do not|don't|never|must not|should not) {_WRAP} {_TARGET} (?:in|with) (?:any )?{_QUOTES}|"
+             rf'\b{_QUOTES} (?:must not|should not|may not|never|do not|cannot) (?:wrap|surround|enclose) {_TARGET}')
+
+
 def _compile_clause(clause, terms, per_item, item_scope):
     checks, rest = [], clause
     only, rest = _compile_only_items(rest)
@@ -180,6 +196,12 @@ def _compile_clause(clause, terms, per_item, item_scope):
         checks.append({'kind': 'contains', 'term': terms[int(match.group(1))], 'negate': negated,
                        'scope': 'item' if per_item else 'answer'})
         rest = rest.replace(match.group(0), ' ', 1)
+    if not item_scope:
+        unquoted, rest2 = _take(rest, _UNQUOTED)
+        if unquoted:   # "no surrounding double quotes" bans double quotes only
+            said = unquoted.group(0)
+            checks.append({'kind': 'unquoted', 'quotes': 'double' if 'double' in said else 'single' if 'single' in said else 'any'})
+            rest = rest2
     json_match, rest2 = _take(rest, r'\b(?:(?:be |as |in )?(?:a |an )?(?:valid )?json(?: format)?(?: (object|array|list))?)\b')
     if json_match and 'json' in json_match.group(0):
         shape = {'object': 'object', 'array': 'array', 'list': 'array'}.get(json_match.group(1), 'any')
@@ -243,7 +265,7 @@ def compile_rubric(criteria):
             checks += found
             if leftover or not found:
                 semantic.append(clause)
-        numeric = [c for c in semantic if re.search(r'\d', c)]
+        numeric = [c for c in semantic if re.search(r'\d', re.sub(r'\x00\d+\x00', ' ', c))]
         if numeric:   # a count or limit the patterns above did not recognise: worth a new phrasing
             log.info('rubric_parser: %d numeric clause(s) left to the judge', len(numeric))
         judge_text = None
@@ -351,6 +373,35 @@ def _unwrap(text):
             if len(text) > len(left) + len(right) and text.startswith(left) and text.endswith(right):
                 text = text[len(left):-len(right)]
     return text
+
+
+_WRAP_QUOTES = (('"', '"'), ('“', '”'), ("'", "'"), ('‘', '’'))
+_QUOTE_KIND = {'"': 'double', '“': 'double', "'": 'single', '‘': 'single'}
+# Part of the content, not a quotation mark: an apostrophe inside a word (don't, it’s) or a plural
+# possessive before a space (customers' choice); and any escaped character (\" inside "...").
+_APOSTROPHE = re.compile(r"(?<=\w)['’](?=\w)|(?<=s)['’](?=\s)")
+_ESCAPED = re.compile(r'\\.')
+
+
+def _wrapping(text):
+    """The kind of quotation marks wrapping all of the (stripped) text, 'double' or 'single', or None."""
+    for left, right in _WRAP_QUOTES:
+        inner = _ESCAPED.sub('', text[1:-1])
+        if left in "'‘":
+            inner = _APOSTROPHE.sub('', inner)
+        backslashes = len(text[:-1]) - len(text[:-1].rstrip('\\'))
+        if len(text) >= 2 and text.startswith(left) and text.endswith(right) and backslashes % 2 == 0 \
+                and left not in inner and (left == right or right not in inner):
+            return _QUOTE_KIND[left]
+    return None
+
+
+def _unquote(text):
+    """The answer without quotation marks that wrap all of it ("Save 40% on inference" -> Save 40% on
+    inference). A length limit is about the content: wrapping quotes are presentation, so they are never
+    counted. Quotes inside the answer, or around only part of it, are content and stay."""
+    text = text.strip()
+    return text[1:-1].strip() if _wrapping(text) else text
 
 
 def is_short_unit(unit):
@@ -492,11 +543,19 @@ def run_check(output, check):
         return ok, f"Valid JSON{'' if ok else ', but not a JSON ' + check['shape']}.", {'json_valid': True}
     if kind == 'only_items':
         return _only_items(output or '', check)
+    if kind == 'unquoted':
+        found, banned = _wrapping((output or '').strip()), check.get('quotes', 'any')
+        wrapped = found is not None and banned in ('any', found)
+        name = 'quotation marks' if banned == 'any' else f'{banned} quotation marks'
+        return (not wrapped, f'The answer is wrapped in {name}.' if wrapped
+                else f'The answer is not wrapped in {name}.', {'wrapped_in_quotes': found})
     if kind == 'list_style':
         return _list_style(output or '', check)
     if kind == 'length' and check['scope'] == 'answer':
-        size = len(output.split()) if check['unit'] == 'words' else len(output.strip())
-        return _within(size, check), f"Answer has {size} {check['unit']}; required {_describe(check)}.", {check['unit']: size}
+        text = _unquote(output or '')
+        size = len(text.split()) if check['unit'] == 'words' else len(text)
+        note = ' (quotation marks wrapping the whole answer not counted)' if len(text) != len((output or '').strip()) else ''
+        return _within(size, check), f"Answer has {size} {check['unit']}{note}; required {_describe(check)}.", {check['unit']: size}
     if kind == 'contains' and check['scope'] == 'answer':
         found = _term_in(check['term'], output or '')
         ok = found != check['negate']

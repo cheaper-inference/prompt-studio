@@ -31,8 +31,9 @@ def current_qcr(task) -> QCR:
 def confirmed(task, split="learn"):
     """Reviewed rows: the user's verdict and comment (optional, on a kept or a flipped verdict)."""
     return [{"id": str(l.pk), "input": l.input, "output": l.output, "passed": l.passed, "reason": l.reason,
-             # a comment on a kept verdict, or on an uploaded one (a labelled sheet: no keep/flip action)
-             "note": bool(l.reason.strip()) and (l.action == "keep" or (l.action == "" and l.source == "upload")),
+             # a comment on a kept verdict, or on a verdict given with none shown (no keep/flip action):
+             # an uploaded sheet, or an output the judge could not answer
+             "note": bool(l.reason.strip()) and l.action in ("keep", ""),
              "flip": l.action == "flip",
              "judged_pass": l.judged_pass, "judged_failed": l.judged_failed or [], "judged_version": l.judged_version,
              "at": l.created_at, "judged_at": judged_at(l)}
@@ -44,8 +45,9 @@ def feedback_since_learn(task) -> int:
     every No, and every comment on a Yes."""
     qs = task.labels.filter(split="learn").filter(
         Q(action="flip") | (Q(action="keep") & ~Q(reason=""))
-        # uploaded rows (a labelled sheet) carry no action: every FAIL, and every PASS with a reason
-        | (Q(source="upload") & Q(action="") & ~Q(passed=None) & (Q(passed=False) | ~Q(reason=""))))
+        # rows reviewed with no verdict shown carry no action (an uploaded sheet, or an output the judge
+        # could not answer): every FAIL, and every PASS with a reason
+        | (Q(action="") & ~Q(passed=None) & (Q(passed=False) | ~Q(reason=""))))
     since = (task.settings or {}).get("learned_through")
     return (qs.filter(labelled_at__gt=since) if since else qs).count()
 

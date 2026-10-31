@@ -1,5 +1,6 @@
 """Learning new rules: the cold-start rewrite, GEPA (called directly), the follow-up check, tips and chaining."""
 from __future__ import annotations
+import re
 import shutil
 import time
 import traceback
@@ -261,11 +262,20 @@ def _same_epoch(task, record) -> bool:
     return record.get("judge_since", _judge_epoch_of(task)) == _judge_epoch_of(task)
 
 
-def _end_gepa_run(task):
-    """GEPA returned (its result is saved as the pending rewrite): drop the checkpoint."""
+def _end_gepa_run(task, mine=None):
+    """GEPA returned (its result is saved as the pending rewrite): drop the checkpoint. mine: the run
+    this job searched in; its folder goes too, even if the task no longer names it (a judge change
+    retired it while the search ran)."""
     run = (task.settings or {}).get("gepa_run") or {}
-    shutil.rmtree(run.get("run_dir", ""), ignore_errors=True) if run.get("run_dir") else None
+    for d in {run.get("run_dir"), (mine or {}).get("run_dir")} - {None, ""}:
+        shutil.rmtree(d, ignore_errors=True)
     _store._update_settings(task, lambda s: {k: v for k, v in s.items() if k != "gepa_run"})
+
+
+def _retired(task, run) -> bool:
+    """The task no longer names this GEPA run as its checkpoint (a judge change dropped it)."""
+    task.refresh_from_db()
+    return ((task.settings or {}).get("gepa_run") or {}).get("id") != run.get("id")
 
 
 def learn_every(task) -> int:
@@ -464,6 +474,25 @@ def _coach_facts(task, rows, result):
     return "\n".join(f"- {f}" for f in facts)
 
 
+def coach_reply(reply):
+    """(tips, rules) from the coach's reply: at most 2 tips ("- ..."), and for each the rule it suggests
+    adding ("RULE: ..." on the line after it), or None. ([], []) for NONE."""
+    text = str(reply or "").strip()
+    if text.upper().startswith("NONE"):
+        return [], []
+    tips, rules = [], []
+    for line in (l.strip() for l in text.splitlines()):
+        rule = re.match(r"(?:[-*]\s*)?\**rule\s*:\s*\**\s*(.+)$", line, re.I)
+        if rule and tips and rules[-1] is None:
+            text = rule.group(1).strip()
+            whole = re.fullmatch(r'"([^"]*)"|“([^“”]*)”', text)     # quotes around the whole rule, not a quoted term in it
+            rules[-1] = ((next(g for g in whole.groups() if g is not None) if whole else text).strip()[:300]) or None
+        elif line.startswith("- "):
+            tips.append(line[2:].strip())
+            rules.append(None)
+    return tips[:2], rules[:2]
+
+
 def _coach(job, payload):
     """After a learning run: up to 2 concrete tips for the person, from the rewriter, logged and shown.
     Best effort: a failure here never affects the run."""
@@ -482,9 +511,10 @@ def _coach(job, payload):
         reply = reflect_once(_judging._payload(task, payload), _config.COACH_PROMPT.format(
             task=task_context(current.task), rules=to_text(current) or "(none yet)", facts=_coach_facts(task, rows, result),
             comments=comments, given="\n".join(f"- {t}" for t in given) or "- (none)"))
-        tips = [l.strip()[2:].strip() for l in str(reply or "").splitlines() if l.strip().startswith("- ")][:2]
-        if tips and not str(reply).strip().upper().startswith("NONE"):
-            _store.log(task, "MiniMe suggests: " + " ".join(tips), kind="tip", tips=tips)
+        tips, rules = coach_reply(reply)
+        if tips:
+            _store.log(task, "MiniMe suggests: " + " ".join(tips), kind="tip", tips=tips,
+                       **({"rules": rules} if any(rules) else {}))
     except Exception:  # noqa: BLE001
         traceback.print_exc()
 
@@ -506,7 +536,13 @@ def _learn(job, payload):
                     break
                 fresh = _judging._payload(task, raw)
                 _, judge, item_judge, _ = _judging.llm(fresh)
-                done += _judging.rejudge_waiting(task, qcr, judge, item_judge, job, _judging.configured_at(fresh))
+                failures = []
+                done += _judging.rejudge_waiting(task, qcr, judge, item_judge, job, _judging.configured_at(fresh), failures)
+                if failures:      # those outputs stay waiting to be judged; another pass would only fail again
+                    _store._update_settings(task, lambda s: {**s, "unjudged_since": timezone.now().isoformat()})
+                    _store.log(task, f"MiniMe could not judge {len(failures)} waiting outputs "
+                               f"({_judging.failure_text(failures)}); they are judged again later.", kind="routine")
+                    break
             return _jobs._finish(job, {"rejudged": done})
         rows = _store.confirmed(task)
         flips = _store.feedback_since_learn(task)
@@ -548,13 +584,27 @@ def _learn(job, payload):
                               f"D_feedback {len(d_feedback)}, D_pareto {len(d_pareto)}, "
                               f"{_store.feedback_since_learn(task)} new feedback, judge {judge_model}, "
                               f"rewriter {payload.get('rewriter_model') or _config.REWRITER_MODEL}")
-            text = run_gepa(current, rows, payload, make_judge, make_item_judge, judge_model, check, mode["max_edits"],
-                            before, _gepa_progress(job), split=(d_feedback, d_pareto), run_dir=run["run_dir"],
-                            stop=lambda: _jobs._cancel_requested(job), timing=timing)
+            from ..durable import JobCancelled
+            searcher = str(getattr(job, "id", "") or "")
+            if searcher:   # a judge change stops this job only (not the one that starts the new epoch)
+                _store._update_settings(task, lambda s: {**s, "gepa_run": {**s["gepa_run"], "job": searcher}}
+                                        if (s.get("gepa_run") or {}).get("id") == run["id"] else s)
+            try:
+                text = run_gepa(current, rows, payload, make_judge, make_item_judge, judge_model, check, mode["max_edits"],
+                                before, _gepa_progress(job), split=(d_feedback, d_pareto), run_dir=run["run_dir"],
+                                stop=lambda: _jobs._cancel_requested(job), timing=timing)
+            except JobCancelled:            # stopped mid-call (a progress write): a retired checkpoint goes too
+                if _retired(task, run):
+                    shutil.rmtree(run["run_dir"], ignore_errors=True)
+                    gepa_log(task.id, "stopped: the judge changed, so its checkpoint was dropped; the next run starts fresh")
+                raise
             marks.append(("GEPA search", time.monotonic()))
             if _jobs._cancel_requested(job):     # stopped mid-search: keep the checkpoint for the next run
+                if _retired(task, run):         # unless a judge change retired it: its scores are the old judge's
+                    shutil.rmtree(run["run_dir"], ignore_errors=True)
+                    gepa_log(task.id, "stopped: the judge changed, so its checkpoint was dropped; the next run starts fresh")
+                    raise JobCancelled("Stopped: the judge changed")
                 gepa_log(task.id, "stopped by the user: checkpoint kept, Start optimizing resumes it")
-                from ..durable import JobCancelled
                 raise JobCancelled("Stopped by the user")
             gepa_log(task.id, "search done: " + ("the rules are unchanged" if text.strip() == to_text(current).strip()
                                                  else "a rewrite was picked (best on D_pareto)"))
@@ -564,7 +614,7 @@ def _learn(job, payload):
             _store._update_settings(task, lambda s: {**s, "pending_rewrite": {"text": text, "based_on": current.version,
                                                                        "mark": mark, "at": timezone.now().isoformat(),
                                                                        "judge_since": epoch}})
-            _end_gepa_run(task)
+            _end_gepa_run(task, run)
         # Every outcome records its timing (⏱ lines and the job result), not only an applied rewrite.
         timed = lambda: _run_timing(task.id, marks, timing.get("logger"))
         try:
@@ -654,4 +704,4 @@ def _chain(job, payload):
         traceback.print_exc()
 
 
-__minime_names__ = ('_GepaLogger', '_chain', '_clear_pending', '_coach', '_coach_facts', '_describe', '_end_gepa_run', '_epoch_now', '_judge_epoch_of', '_same_epoch', '_example', '_gepa_dir', '_gepa_progress', '_gepa_run', '_grade', '_learn', '_records', '_run_timing', 'direct_rewrite', 'gepa_log', 'learn_every', 'learning_phase', 'reflect_once', 'rewriter_call', 'run_gepa', 'run_learn', 'split_train', 'test_pick',)
+__minime_names__ = ('_GepaLogger', '_chain', '_clear_pending', '_coach', '_coach_facts', '_describe', '_end_gepa_run', '_epoch_now', '_example', '_gepa_dir', '_gepa_progress', '_gepa_run', '_grade', '_judge_epoch_of', '_learn', '_records', '_retired', '_run_timing', '_same_epoch', 'coach_reply', 'direct_rewrite', 'gepa_log', 'learn_every', 'learning_phase', 'reflect_once', 'rewriter_call', 'run_gepa', 'run_learn', 'split_train', 'test_pick',)

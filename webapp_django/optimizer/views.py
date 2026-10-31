@@ -337,7 +337,12 @@ def minime_dismiss_tip(request: HttpRequest, task_id):
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])
     task = mm.get_task(task_id, request.user.username)
-    mm.dismiss_tip(task, _json_body(request).get("at"))
+    body = _json_body(request)
+    if "add" in body:                       # "Add rule": the rule this tip suggests, as the user's own edit
+        mm.add_tip_rule(task, body.get("at"), body.get("add"))
+        mm.run_rejudge(task, request.user.username)
+    else:
+        mm.dismiss_tip(task, body.get("at"))
     return JsonResponse(mm.summary(task))
 
 
@@ -360,7 +365,8 @@ def minime_label(request: HttpRequest, task_id, label_id: int):
         return HttpResponseNotAllowed(["POST"])
     task = mm.get_task(task_id, request.user.username)
     p = _json_body(request)
-    mm.review(task, label_id, p.get("action"), p.get("verdict"), p.get("reason"), p.get("shown_pass"))
+    mm.review(task, label_id, p.get("action"), p.get("verdict"), p.get("reason"), p.get("shown_pass"),
+              hidden="shown_pass" in p and p["shown_pass"] is None)     # the card showed no verdict
     mm.pause_if_ready(task)              # a blind check can complete Ready: then pause, start nothing
     mm.autostart(task, request.user.username)
     return JsonResponse({"next": mm.next_candidate(task), "task": mm.summary(task)})
@@ -373,6 +379,7 @@ def minime_queue(request: HttpRequest, task_id):
     if request.method == "POST":          # nothing waiting and nothing running: start the loop again
         mm.autostart(task, request.user.username)
     mm.ensure_scored(task, request.user.username)   # versions behind on the blind checks: catch up
+    mm.catch_up_waiting(task, request.user.username)  # waiting outputs judged with older rules, or not at all
     return JsonResponse({"next": mm.next_candidate(task), "task": mm.summary(task)})
 
 

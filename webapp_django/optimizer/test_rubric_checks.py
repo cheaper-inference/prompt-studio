@@ -78,6 +78,45 @@ class RubricParserTests(SimpleTestCase):
         self.assertNotIn('customer-demo-123', '\n'.join(logs.output).lower())
         self.assertNotIn(criterion.lower(), '\n'.join(logs.output).lower())
 
+    def test_answer_length_ignores_quotes_wrapping_the_whole_answer(self):
+        check = checks('The answer is at most 10 characters')[1][0]
+        for answer, ok in [('"0123456789"', True), ('“0123456789”', True), ("'0123456789'", True),
+                           ('0123456789', True), ('"012345678"9', False), ('say "hi" 0123', False),
+                           ('"0123456789A"', False)]:
+            self.assertEqual(run_check(answer, check)[0], ok, answer)
+        self.assertIn('quotation marks wrapping the whole answer not counted', run_check('"0123"', check)[1])
+
+    def test_wrapping_quote_rules_are_a_code_check(self):
+        for criterion in ['Any wrapping quotes FAIL.', 'The answer must be presented without any wrapper quotes',
+                          'The whole answer must be presented without any wrapping quotes.',
+                          'The answer must not be wrapped in quotation marks.', 'Do not wrap the answer in quotes.',
+                          'Quotation marks must not wrap the whole answer.', 'No surrounding quotes.']:
+            self.assertEqual(checks(criterion), ('deterministic', [{'kind': 'unquoted', 'quotes': 'any'}]), criterion)
+        self.assertEqual(checks('At most 120 characters, without wrapping quotes')[1],
+                         [{'kind': 'length', 'unit': 'characters', 'scope': 'answer', 'min': None, 'max': 120},
+                          {'kind': 'unquoted', 'quotes': 'any'}])
+        for criterion in ['No quotes.', 'Use quotes from customers', 'Wrap key terms in quotes',
+                          'Each tagline must not be wrapped in quotes.']:   # not about wrapping the answer: the judge
+            self.assertFalse(any(c['kind'] == 'unquoted' for c in checks(criterion)[1]), criterion)
+        check = {'kind': 'unquoted', 'quotes': 'any'}
+        for answer, ok in [('"Save 40% on inference"', False), ('“Save big”', False), ("'Save big'", False),
+                           ('  "Save big"\n', False), ('Save "big" now', True), ('Save big', True), ('"Save" big', True),
+                           ("'Don't wait'", False), ('‘Don’t wait’', False), ("Don't wait", True),   # apostrophes are not quotes
+                           ("'Customers' choice'", False), ('‘Customers’ choice’', False),          # nor plural possessives
+                           ("'Save' or 'win'", True), ("'Bosses' and 'workers'", True),            # two quoted spans
+                           ('"Say \\"hi\\""', False), ('"ends with \\"', True),                   # escaped quotes are content
+                           ('""', False), ('"a\\\\"', False), ('"a\\\\\\"', True)]:              # empty; \\ before the end is not an escape
+            self.assertEqual(run_check(answer, check)[0], ok, answer)
+        self.assertEqual(checks('No surrounding double quotes.')[1], [{'kind': 'unquoted', 'quotes': 'double'}])
+        double = {'kind': 'unquoted', 'quotes': 'double'}
+        self.assertEqual((run_check('"Save big"', double)[0], run_check("'Save big'", double)[0]), (False, True))
+        length = checks('The answer is at most 10 characters')[1][0]
+        self.assertTrue(run_check("'Don't wait'", length)[0])          # 10 characters inside the quotes
+        self.assertTrue(run_check('"Say \\"hi\\""', checks('The answer is at most 10 characters')[1][0])[0])   # Say \"hi\" is 10
+        from ps_utils.spec_draft import render
+        for c in (check, double, {'kind': 'unquoted', 'quotes': 'single'}):
+            self.assertEqual(checks(render(c, None))[1], [c])          # its canonical wording compiles back to it
+
     def test_every_character_is_how_to_count_not_a_list(self):
         self.assertEqual(checks('The tweet is at most 280 characters long, counting every character including emojis')[1],
                          [{'kind': 'length', 'unit': 'characters', 'scope': 'answer', 'min': None, 'max': 280}])
@@ -174,7 +213,7 @@ class CombinedScorerTests(SimpleTestCase):
         p = payload(); p.update(evaluation_mode='rubric', criteria=['Exactly 4 items'],
                                 deterministic_checks=[{'criterion_index': 0, 'criterion': 'stale', 'kind': 'bogus'}])
         manifest = b.validate(p)
-        self.assertEqual(manifest['scoring']['rubric_compiler'], 'rubric-parser-v6')
+        self.assertEqual(manifest['scoring']['rubric_compiler'], 'rubric-parser-v7')
         self.assertEqual(manifest['scoring']['compiled_rubric'][0]['method'], 'deterministic')
         self.assertNotIn('deterministic_checks', manifest['scoring'])
         endpoint = Endpoint(base_url='https://unused.invalid/v1', api_key='never-sent')

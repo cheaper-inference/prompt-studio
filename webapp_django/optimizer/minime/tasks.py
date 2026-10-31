@@ -41,7 +41,8 @@ def next_candidate(task) -> dict | None:
     if l is None:
         return None
     blind = l.split == "heldout" or l.judged_pass is None
-    out = {"id": l.pk, "input": l.input, "output": l.output, "blind": blind}
+    out = {"id": l.pk, "input": l.input, "output": l.output, "blind": blind,
+           "unjudged": blind and l.split != "heldout"}      # the judge could not answer yet: no verdict to hide
     if not blind:
         out.update(judged_pass=l.judged_pass, failed=[f["text"] for f in l.judged_failed or []],
                    judged_version=l.judged_version)        # older than the rules: the page says so
@@ -130,7 +131,7 @@ def clone_task(task, owner, definition, name=None) -> MiniMeTask:
     return new
 
 
-def edit_qcr(task, statements) -> MiniMeVersion:
+def edit_qcr(task, statements, note="You edited the rubric. Waiting outputs will be re-judged.") -> MiniMeVersion:
     """The user's own edits: a new version; waiting answers are re-judged with it."""
     current = _store.current_qcr(task)
     old = {s.id: s for s in current.statements}
@@ -158,7 +159,41 @@ def edit_qcr(task, statements) -> MiniMeVersion:
         raise _config.MiniMeError("Nothing changed.")
     qcr = QCR(task=current.task, statements=out, evaluator_model=current.evaluator_model)
     v = _store._new_version(task, qcr, "edit")
-    _store.log(task, "You edited the rubric. Waiting outputs will be re-judged.")
+    _store.log(task, note)
+    return v
+
+
+def add_tip_rule(task, at, index) -> MiniMeVersion:
+    """Add the rule a MiniMe tip suggests (its "Add rule" button), as the user's own edit: a new
+    version, and waiting outputs are re-judged with it. Each suggested rule is added once.
+    One transaction on the locked, freshly read task: two clicks at once cannot both build on the same
+    rules (the second would drop the first's rule while both are marked added)."""
+    from django.db import transaction
+    with transaction.atomic():
+        v = _add_tip_rule(type(task).objects.select_for_update().get(pk=task.pk), at, index)
+    task.refresh_from_db()           # the caller's copy shows the new rule and the marker
+    return v
+
+
+def _add_tip_rule(task, at, index) -> MiniMeVersion:
+    entry = next((e for e in (task.settings or {}).get("log") or [] if e.get("at") == at and e.get("kind") == "tip"), None)
+    rules = (entry or {}).get("rules") or []
+    if not isinstance(index, int) or not 0 <= index < len(rules) or not rules[index]:
+        raise _config.MiniMeError("no such suggested rule")
+    if index in (entry.get("added") or []):
+        raise _config.MiniMeError("That rule was already added.")
+    text = rules[index]
+    current = _store.current_qcr(task)
+    if text.strip().lower() in {s.text.strip().lower() for s in current.active()}:
+        raise _config.MiniMeError("The rules already have it.")
+    kept = [{"id": s.id, "text": s.text, "status": s.status} for s in current.statements if s.status != "retired"]
+    v = edit_qcr(task, kept + [{"text": text}], note=f"You added MiniMe's suggested rule: {text} Waiting outputs will be re-judged.")
+    def mark(settings):
+        for e in settings.get("log") or []:
+            if e.get("at") == at and e.get("kind") == "tip":
+                e["added"] = sorted(set(e.get("added") or []) | {index})
+        return settings
+    _store._update_settings(task, mark)
     return v
 
 
@@ -231,45 +266,27 @@ def upload_labels(task, text, input_col="input", output_col="output", split="lea
     return len(parsed)
 
 
-def interpret_feedback(task, label, seen, comment) -> bool:
-    """True when free-text feedback accepts the verdict the user saw (it may still criticise the
-    reasons: that is a comment on a kept verdict). One call to the task model, which is fast."""
-    complete = _judging.llm(_judging._payload(task, {"task_id": str(task.id), "_owner": task.owner}))[0]
-    verdict = "PASS" if seen else "FAIL"
-    reply = complete(_config.INTERPRET.format(output=label.output[:2000], said=_judging.assessment(seen, label.judged_failed),
-                                      comment=comment, verdict=verdict))
-    return not str(reply or "").strip().upper().startswith("CHANGE")
-
-
-def review(task, label_id, action, verdict=None, reason="", shown_pass=None) -> MiniMeLabel:
-    """keep / flip the judge's verdict, or (blind rows) give one. reason: the user's comment, optional
-    on any answer; it is what learning reads (on a kept verdict too: right verdict, wrong reason).
-    shown_pass: the verdict the user saw. Keep and flip refer to it, not to the stored one, which a
-    re-judge (after a rubric edit) may have changed while the answer was on screen."""
+def review(task, label_id, action, verdict=None, reason="", shown_pass=None, hidden=False) -> MiniMeLabel:
+    """The user's verdict on an answer, the same Pass / Fail with or without MiniMe's verdict shown.
+    reason: the user's comment, optional either way; it is what learning reads (with a verdict that
+    matches MiniMe's too: right verdict, wrong reason). On a shown answer the verdict is recorded as
+    keep or flip against shown_pass, the verdict the user saw (a re-judge after a rubric edit may have
+    changed the stored one while the answer was on screen). keep / flip remain as direct actions."""
     label = task.labels.filter(pk=label_id).first()
     if label is None:
         raise _config.MiniMeError("output not found")
     reason = str(reason or "").strip()
-    blind = label.split == "heldout" or label.judged_pass is None
-    if action == "comment" and not blind:
-        # Only words: whether they agree with MiniMe's verdict is for the model to read, not the user to tick.
-        if not reason:
-            raise _config.MiniMeError("write your feedback first")
-        seen = shown_pass if isinstance(shown_pass, bool) else label.judged_pass
-        try:
-            agrees = interpret_feedback(task, label, seen, reason)
-        except Exception as exc:  # noqa: BLE001
-            raise _config.MiniMeError(f"could not read your feedback right now ({type(exc).__name__}); try again")
-        label.passed, label.action = (seen if agrees else not seen), ("keep" if agrees else "flip")
-    elif action in ("keep", "flip") and not blind:
-        seen = shown_pass if isinstance(shown_pass, bool) else label.judged_pass
-        label.passed = seen if action == "keep" else not seen
-        label.action = action
-    elif action == "label":
+    # hidden: the card showed no verdict (shown_pass sent as null), even if one arrived meanwhile
+    blind = hidden or label.split == "heldout" or label.judged_pass is None
+    seen = None if blind else shown_pass if isinstance(shown_pass, bool) else label.judged_pass
+    if action == "label":
         passed = parse_verdict(verdict)
         if passed is None:
             raise _config.MiniMeError("choose Pass or Fail")
-        label.passed, label.action = passed, ""
+        label.passed, label.action = passed, "" if blind else ("keep" if passed == seen else "flip")
+    elif action in ("keep", "flip") and not blind:
+        label.passed = seen if action == "keep" else not seen
+        label.action = action
     else:
         raise _config.MiniMeError("unknown action")
     label.reason, label.labelled_at = reason, timezone.now()
@@ -287,4 +304,4 @@ def dismiss_tip(task, at) -> None:
     _store._update_settings(task, mark)
 
 
-__minime_names__ = ('apply_proposal', 'clone_task', 'create_task', 'delete_task', 'dismiss_tip', 'edit_qcr', 'interpret_feedback', 'next_candidate', 'review', 'reword_task', 'summary', 'undo_change', 'update_task', 'upload_labels',)
+__minime_names__ = ('add_tip_rule', 'apply_proposal', 'clone_task', 'create_task', 'delete_task', 'dismiss_tip', 'edit_qcr', 'next_candidate', 'review', 'reword_task', 'summary', 'undo_change', 'update_task', 'upload_labels',)

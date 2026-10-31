@@ -8,6 +8,19 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from . import benchmarks as b
 from .models import Run
 
+# Benchmark cases run one at a time here, whatever the shell exports: parallel cases write job state
+# from several threads, which Django's in-memory test database cannot take ("table is locked"), and
+# call-order assertions assume serial cases. Tests of concurrency set GP_BENCHMARK_CONCURRENCY themselves.
+_SERIAL = patch.dict(os.environ, {'GP_BENCHMARK_CONCURRENCY': '1'})
+
+
+def setUpModule():
+    _SERIAL.start()
+
+
+def tearDownModule():
+    _SERIAL.stop()
+
 
 def payload():
     return {'name':'Review','dataset_name':'test','baseline':[{'role':'user','content':'{{q}}'}],
