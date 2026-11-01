@@ -11,8 +11,9 @@ import re
 
 log = logging.getLogger(__name__)
 
-VERSION = 'rubric-parser-v7'   # v2: judge_scope; v3: item_unit, only_items, lead-in groups; v4: markdown tables;
-                               # v5: more limit phrasings; v6: full-clause negations; v7: wrapping-quote checks
+VERSION = 'rubric-parser-v8'   # v2: judge_scope; v3: item_unit, only_items, lead-in groups; v4: markdown tables;
+                               # v5: more limit phrasings; v6: full-clause negations; v7: wrapping-quote checks;
+                               # v8: negated one-sided limits, apostrophes inside quoted terms
 
 _NUMBERS = {w: str(i) for i, w in enumerate(
     'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen '
@@ -28,23 +29,31 @@ _N = r'(\d+)'
 # Negations a limit can follow ("must not surpass", "can't go beyond", "should never exceed").
 _NEG = r"(?:not|never|cannot|can't|don't|doesn't|won't|shouldn't|mustn't)"
 _NEGATED = re.compile(r"\b(?:not|never|no|cannot)\b|n't\b")
-# (pattern, bound) where bound maps the captured numbers to (min, max), inclusive.
+# A negation right before a one-sided limit, at most one plain verb apart: "no fewer than 3 items",
+# "should not have more than 3 bullets", "don't go under 10 words". Anything looser goes to the judge.
+_NEG_ADJACENT = re.compile(r"(?:\b(?:do|does) )?\b(?:not|never|no|cannot|\w+n't) (?:(?:have|has|use|contain|include|"
+                           r"write|give|return|list|produce|generate|be|go) )?$")
+# "No emojis, under 50 words": a "no ..." closed by a comma names something else, unless a modal
+# after it carries the negation on ("no reply, ever, should have more than 3 items").
+_NO_ITEM = re.compile(r"\bno\b[^,]*,(?!.*\b(?:should|must|may|might|can|could|will|would|shall)\b)")
+# (pattern, bound, negatable) where bound maps the captured numbers to (min, max), inclusive. A negatable
+# bound carries no negation of its own, so one before it flips it (see _bound).
 _BOUNDS = [
-    (rf'between {_N} and {_N} {{u}}', lambda a, b: (int(a), int(b))),
-    (rf'{_N} ?(?:-|to) ?{_N} {{u}}', lambda a, b: (int(a), int(b))),
-    (rf'(?:no more than|not more than|at most|up to|a maximum of|maximum of|max(?:imum)?|<=|no longer than) {_N} {{u}}', lambda n: (None, int(n))),
-    (rf'(?:{_NEG} (?:exceed(?:ing)?|go(?:ing)? over|be (?:longer|more) than)|within) {_N} {{u}}', lambda n: (None, int(n))),
+    (rf'between {_N} and {_N} {{u}}', lambda a, b: (int(a), int(b)), False),
+    (rf'{_N} ?(?:-|to) ?{_N} {{u}}', lambda a, b: (int(a), int(b)), False),
+    (rf'(?:no more than|not more than|at most|up to|a maximum of|maximum of|max(?:imum)?|<=|no longer than) {_N} {{u}}', lambda n: (None, int(n)), False),
+    (rf'(?:{_NEG} (?:exceed(?:ing)?|go(?:ing)? over|be (?:longer|more) than)|within) {_N} {{u}}', lambda n: (None, int(n)), False),
     (rf'{_NEG} (?:surpass(?:ing)?|go(?:ing)? (?:beyond|above)|top(?:ping)?|(?:be |go |going )?(?:over|above|beyond)|'
-     rf'be (?:greater|higher) than) {_N} {{u}}', lambda n: (None, int(n))),
-    (rf'{_N} {{u}} (?:max(?:imum)?|at most|tops|or under)', lambda n: (None, int(n))),
-    (rf'{_N} {{u}} or (?:fewer|less)(?: each)?', lambda n: (None, int(n))),
-    (rf'(?:fewer than|less than|under|below|<) {_N} {{u}}', lambda n: (None, int(n) - 1)),
-    (rf'(?:no fewer than|no less than|at least|a minimum of|minimum of|min(?:imum)?|>=) {_N} {{u}}', lambda n: (int(n), None)),
-    (rf'{_N} {{u}} or more', lambda n: (int(n), None)),
-    (rf'(?:more than|over|>) {_N} {{u}}', lambda n: (int(n) + 1, None)),
-    # Bare "exceed / surpass N" (no negation before it, see _bound): a minimum, more than N.
-    (rf'(?:exceed(?:s|ing)?|surpass(?:es|ing)?|go(?:es)? beyond) {_N} {{u}}', lambda n: (int(n) + 1, None)),
-    (rf'(?:exactly |precisely )?{_N} {{u}}', lambda n: (int(n), int(n))),
+     rf'be (?:greater|higher) than) {_N} {{u}}', lambda n: (None, int(n)), False),
+    (rf'{_N} {{u}} (?:max(?:imum)?|at most|tops|or under)', lambda n: (None, int(n)), False),
+    (rf'{_N} {{u}} or (?:fewer|less)(?: each)?', lambda n: (None, int(n)), True),
+    (rf'(?:fewer than|less than|under|below|<) {_N} {{u}}', lambda n: (None, int(n) - 1), True),
+    (rf'(?:no fewer than|no less than|at least|a minimum of|minimum of|min(?:imum)?|>=) {_N} {{u}}', lambda n: (int(n), None), False),
+    (rf'{_N} {{u}} or more', lambda n: (int(n), None), True),
+    (rf'(?:more than|over|>) {_N} {{u}}', lambda n: (int(n) + 1, None), True),
+    # Bare "exceed / surpass N": a minimum, more than N.
+    (rf'(?:exceed(?:s|ing)?|surpass(?:es|ing)?|go(?:es)? beyond) {_N} {{u}}', lambda n: (int(n) + 1, None), True),
+    (rf'(?:exactly |precisely )?{_N} {{u}}', lambda n: (int(n), int(n)), False),
 ]
 _STOP = set('''a an the each every all any per must should shall will needs need to be is are was have has had
 contain contains containing include includes including consist consists of in on at total overall with only
@@ -58,19 +67,24 @@ _PLACEHOLDER = '\x00{}\x00'
 
 
 def _normalize(text):
-    t = text.lower().replace('≤', '<=').replace('≥', '>=').replace('–', '-')
+    t = text.lower().replace('≤', '<=').replace('≥', '>=').replace('–', '-').replace('’', "'")   # quoted terms are out by now
     t = re.sub(r'\b(?:less|fewer) than or equal to\b', '<=', t)
     t = re.sub(r'\b(?:greater|more) than or equal to\b', '>=', t)
     t = re.sub(r'\b(' + '|'.join(_NUMBERS) + r')\b', lambda m: _NUMBERS[m.group(1)], t)
     return re.sub(r'\s+', ' ', t).strip()
 
 
+# Each quote closes with its own partner. A single quote touching a letter on its outer side is an
+# apostrophe ("don't", "customer's", "don’t"), so it neither opens nor closes a term.
+_QUOTED = re.compile(r'"([^"]+)"|“([^”]+)”|(?<!\w)\'(.+?)\'(?!\w)|(?<!\w)‘(.+?)’(?!\w)')
+
+
 def _protect_quotes(text):
     terms = []
     def keep(match):
-        terms.append(match.group(2))
+        terms.append(next(g for g in match.groups() if g is not None))
         return _PLACEHOLDER.format(len(terms) - 1)
-    return re.sub(r'(["\'“‘])(.+?)(["\'”’])', keep, text), terms
+    return _QUOTED.sub(keep, text), terms
 
 
 def _clauses(text):
@@ -105,17 +119,22 @@ _QUALIFIER = re.compile(r'\b(?:not|no|never|exceed\w*|surpass\w*|over|under|abov
 
 
 def _bound(clause, unit):
-    for n, (template, bound) in enumerate(_BOUNDS):
+    for n, (template, bound, negatable) in enumerate(_BOUNDS):
         match, rest = _take(clause, r'(?<!\w)' + template.format(u=unit) + r'(?!\w)')
         if match and n == len(_BOUNDS) - 1 and not re.match(r'(?:exactly|precisely) ', match.group(0)) \
                 and _QUALIFIER.search(' '.join(clause[:match.start()].split()[-3:])):
             return None, clause
-        if match and template.startswith('(?:exceed') and _NEGATED.search(clause[:match.start()]):
-            # An intervening phrase must not turn "do not ... exceed N" into a
-            # minimum. If a maximum pattern missed the phrasing, defer to the judge.
-            return None, clause
         if match:
             low, high = bound(*match.groups())
+            before = clause[:match.start()]
+            if negatable and _NEG_ADJACENT.search(before):
+                # "no fewer than 3" is at least 3, "not more than 50" at most 50.
+                low, high = (None, low - 1) if high is None else (high + 1, None)
+                rest = _NEG_ADJACENT.sub('', before) + rest[len(before):]
+            elif negatable and _NEGATED.search(_NO_ITEM.sub(' ', before)):
+                # An intervening phrase must not turn "do not ... exceed N" into a
+                # minimum. If a maximum pattern missed the phrasing, defer to the judge.
+                return None, clause
             if (low is None or low >= 0) and (high is None or high >= 0) and (low is None or high is None or low <= high):
                 return {'min': low, 'max': high}, rest
     return None, clause
@@ -186,10 +205,10 @@ def _compile_clause(clause, terms, per_item, item_scope):
         if size:
             checks.append({'kind': 'length', 'unit': unit, 'scope': 'item' if item_scope else 'answer', **size})
             rest = rest2
-    for match in list(re.finditer(r'\b(?:must not|should not|may not|cannot|never|not|no|avoid|without)?\s*'
+    for match in list(re.finditer(rf'\b(?:must not|should not|may not|cannot|never|not|no|avoid|without|{_NEG})?\s*'
                                   r'(?:include|contain|mention|use|using|including|containing|mentioning)?s?\s*'
                                   r'(?:the )?(?:words?|phrases?|terms?|keywords?)?\s*\x00(\d+)\x00', rest)):
-        negated = bool(re.search(r'\b(?:not|never|no|avoid|without)\b', match.group(0)))
+        negated = bool(re.search(r"\b(?:not|never|no|avoid|without)\b|n't\b", match.group(0)))
         verb = re.search(r'\b(?:include|contain|mention|use|using|including|containing|mentioning|avoid|without)', match.group(0))
         if not verb:
             continue

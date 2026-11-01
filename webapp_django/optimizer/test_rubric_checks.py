@@ -70,6 +70,58 @@ class RubricParserTests(SimpleTestCase):
         for criterion, expected in cases.items():
             self.assertEqual(checks(criterion), ('deterministic', expected), criterion)
 
+    def test_negated_one_sided_limits_flip_instead_of_inverting(self):
+        def length(low, high, unit='words'):
+            return [{'kind': 'length', 'unit': unit, 'scope': 'answer', 'min': low, 'max': high}]
+        def count(low, high):
+            return [{'kind': 'item_count', 'min': low, 'max': high}]
+        cases = {'The answer should not have more than 3 bullet points.': count(None, 3),
+                 'No fewer than 3 items.': count(3, None),
+                 'Do not write fewer than 3 items.': count(3, None),
+                 'No less than 20 words.': length(20, None),
+                 'Must not have less than 20 words.': length(20, None),
+                 'Never more than 50 words.': length(None, 50),
+                 'Do not use more than 50 words.': length(None, 50),
+                 'Must not contain over 100 characters.': length(None, 100, 'characters'),
+                 'Do not use 5 words or more.': length(None, 4),
+                 "Don't go under 10 words.": length(10, None),
+                 'Should never exceed 50 words.': length(None, 50),
+                 'More than 3 items.': count(4, None),
+                 'Under 50 words.': length(None, 49)}
+        for criterion, expected in cases.items():
+            self.assertEqual(checks(criterion), ('deterministic', expected), criterion)
+        # A "no ..." closed by a comma names something else; the limit after it stands.
+        self.assertIn({'kind': 'length', 'unit': 'words', 'scope': 'answer', 'min': None, 'max': 49},
+                      checks('No emojis, under 50 words.')[1])
+        # A negation further away is not guessed at: the limit goes to the judge.
+        for criterion in ['Do not under any circumstances use more than 50 words.',
+                          'No reply should have more than 3 items.', 'No reply, ever, should have more than 3 items.']:
+            entry = compile_rubric([criterion])[0]
+            self.assertEqual((entry['method'], entry['checks']), ('llm_judge', []), criterion)
+
+    def test_negated_limits_pass_compliant_answers(self):
+        check = checks('The answer should not have more than 3 bullet points.')[1][0]
+        self.assertTrue(run_check('- a\n- b', check)[0])
+        self.assertFalse(run_check('- a\n- b\n- c\n- d\n- e', check)[0])
+        check = checks('No fewer than 3 items.')[1][0]
+        self.assertTrue(run_check('- a\n- b\n- c\n- d', check)[0])
+        self.assertFalse(run_check('- a\n- b', check)[0])
+
+    def test_apostrophes_do_not_end_quoted_terms(self):
+        def contains(term, negate):
+            return [{'kind': 'contains', 'term': term, 'negate': negate, 'scope': 'answer'}]
+        cases = {"Never include 'we're sorry'.": contains("we're sorry", True),
+                 "Must include the phrase 'don't worry'.": contains("don't worry", False),
+                 "Don't mention 'price'.": contains('price', True),
+                 'Don’t mention ‘price’.': contains('price', True),
+                 "It's required to include 'refund policy'.": contains('refund policy', False),
+                 "Do not use the word 'can't'.": contains("can't", True)}
+        for criterion, expected in cases.items():
+            self.assertEqual(checks(criterion)[1], expected, criterion)
+        check = checks("Never include 'we're sorry'.")[1][0]
+        self.assertTrue(run_check('We will ship your order tomorrow.', check)[0])
+        self.assertFalse(run_check("We're sorry for the delay.", check)[0])
+
     def test_numeric_diagnostics_do_not_log_private_rubric_text(self):
         criterion = 'Include the private Customer-DEMO-123 launch plan in approximately 200 words'
         with self.assertLogs('ps_utils.rubric_parser', 'INFO') as logs:
@@ -213,7 +265,7 @@ class CombinedScorerTests(SimpleTestCase):
         p = payload(); p.update(evaluation_mode='rubric', criteria=['Exactly 4 items'],
                                 deterministic_checks=[{'criterion_index': 0, 'criterion': 'stale', 'kind': 'bogus'}])
         manifest = b.validate(p)
-        self.assertEqual(manifest['scoring']['rubric_compiler'], 'rubric-parser-v7')
+        self.assertEqual(manifest['scoring']['rubric_compiler'], 'rubric-parser-v8')
         self.assertEqual(manifest['scoring']['compiled_rubric'][0]['method'], 'deterministic')
         self.assertNotIn('deterministic_checks', manifest['scoring'])
         endpoint = Endpoint(base_url='https://unused.invalid/v1', api_key='never-sent')
