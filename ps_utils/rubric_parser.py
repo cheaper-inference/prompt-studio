@@ -13,7 +13,8 @@ log = logging.getLogger(__name__)
 
 VERSION = 'rubric-parser-v8'   # v2: judge_scope; v3: item_unit, only_items, lead-in groups; v4: markdown tables;
                                # v5: more limit phrasings; v6: full-clause negations; v7: wrapping-quote checks;
-                               # v8: negated one-sided limits, apostrophes inside quoted terms
+                               # v8: negated one-sided limits, apostrophes inside quoted terms,
+                               #     judge told exactly which parts code verified
 
 _NUMBERS = {w: str(i) for i, w in enumerate(
     'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen '
@@ -28,14 +29,18 @@ _UNITS = {'words': r'words?', 'characters': r'(?:characters?|chars?)'}
 _N = r'(\d+)'
 # Negations a limit can follow ("must not surpass", "can't go beyond", "should never exceed").
 _NEG = r"(?:not|never|cannot|can't|don't|doesn't|won't|shouldn't|mustn't)"
-_NEGATED = re.compile(r"\b(?:not|never|no|cannot)\b|n't\b")
+# Words that can turn a limit around from anywhere in its clause: "without exceeding 50 words", "avoid more
+# than 50 words", "none of the keywords should exceed 5 words", "more than 50 words is not allowed", "answers
+# over 50 words fail". A one-sided limit next to one of these is not compiled; the judge reads it whole.
+_REVERSES = re.compile(r"\b(?:not|never|no|cannot|without|avoid\w*|nothing|none|neither|nor|fail\w*|reject\w*|"
+                       r"forbid\w*|prohibit\w*|disallow\w*|penali[sz]\w*|ban|bans|banned)\b|n't\b")
+# "You may mention 'x'", "including 'x' is optional": a quoted term that is allowed, not required.
+_PERMISSIVE = re.compile(r"\b(?:may|might|can|could|optional(?:ly)?|fine|ok|okay|allowed|permitted|free to|"
+                         r"if (?:needed|relevant|appropriate|possible|applicable|asked)|unless|preferably|ideally)\b")
 # A negation right before a one-sided limit, at most one plain verb apart: "no fewer than 3 items",
 # "should not have more than 3 bullets", "don't go under 10 words". Anything looser goes to the judge.
 _NEG_ADJACENT = re.compile(r"(?:\b(?:do|does) )?\b(?:not|never|no|cannot|\w+n't) (?:(?:have|has|use|contain|include|"
                            r"write|give|return|list|produce|generate|be|go) )?$")
-# "No emojis, under 50 words": a "no ..." closed by a comma names something else, unless a modal
-# after it carries the negation on ("no reply, ever, should have more than 3 items").
-_NO_ITEM = re.compile(r"\bno\b[^,]*,(?!.*\b(?:should|must|may|might|can|could|will|would|shall)\b)")
 # (pattern, bound, negatable) where bound maps the captured numbers to (min, max), inclusive. A negatable
 # bound carries no negation of its own, so one before it flips it (see _bound).
 _BOUNDS = [
@@ -126,15 +131,20 @@ def _bound(clause, unit):
             return None, clause
         if match:
             low, high = bound(*match.groups())
-            before = clause[:match.start()]
-            if negatable and _NEG_ADJACENT.search(before):
+            before, after = clause[:match.start()], clause[match.end():]
+            adjacent = negatable and _NEG_ADJACENT.search(before)
+            if negatable and (_REVERSES.search(after) or _REVERSES.search(before[:adjacent.start()] if adjacent else before)):
+                # Any other negation around the limit may scope over it ("no answer should, under any
+                # circumstances, exceed 50 words") or not ("never include 'x', keep under 50 words").
+                # Not guessed at: the limit goes to the judge.
+                return None, clause
+            if adjacent:
                 # "no fewer than 3" is at least 3, "not more than 50" at most 50.
                 low, high = (None, low - 1) if high is None else (high + 1, None)
-                rest = _NEG_ADJACENT.sub('', before) + rest[len(before):]
-            elif negatable and _NEGATED.search(_NO_ITEM.sub(' ', before)):
-                # An intervening phrase must not turn "do not ... exceed N" into a
-                # minimum. If a maximum pattern missed the phrasing, defer to the judge.
-                return None, clause
+                if not re.search(r'\d', rest[len(before):]):
+                    # A limit after this one keeps the negation in view, so it is not compiled on its own:
+                    # "do not use more than 50 words or exceed 200 characters" (see below).
+                    rest = _NEG_ADJACENT.sub('', before) + rest[len(before):]
             if (low is None or low >= 0) and (high is None or high >= 0) and (low is None or high is None or low <= high):
                 return {'min': low, 'max': high}, rest
     return None, clause
@@ -205,15 +215,29 @@ def _compile_clause(clause, terms, per_item, item_scope):
         if size:
             checks.append({'kind': 'length', 'unit': unit, 'scope': 'item' if item_scope else 'answer', **size})
             rest = rest2
+    text = rest
     for match in list(re.finditer(rf'\b(?:must not|should not|may not|cannot|never|not|no|avoid|without|{_NEG})?\s*'
                                   r'(?:include|contain|mention|use|using|including|containing|mentioning)?s?\s*'
-                                  r'(?:the )?(?:words?|phrases?|terms?|keywords?)?\s*\x00(\d+)\x00', rest)):
+                                  r'(?:the )?(?:words?|phrases?|terms?|keywords?)?\s*\x00(\d+)\x00'
+                                  r'((?:\s*,?\s*(?:or|nor)\s*\x00\d+\x00|\s*,\s*\x00\d+\x00)*)', text)):
         negated = bool(re.search(r"\b(?:not|never|no|avoid|without)\b|n't\b", match.group(0)))
         verb = re.search(r'\b(?:include|contain|mention|use|using|including|containing|mentioning|avoid|without)', match.group(0))
         if not verb:
             continue
-        checks.append({'kind': 'contains', 'term': terms[int(match.group(1))], 'negate': negated,
-                       'scope': 'item' if per_item else 'answer'})
+        before, after = text[:match.start()], text[match.end():]
+        if _REVERSES.search(before) or _REVERSES.search(after) or _PERMISSIVE.search(text) \
+                or re.search(r'\b(?:times?|once|twice)\b', after):
+            # Another negation or an allowance around the term may turn it around: "don't ever mention 'x'",
+            # "answers that don't mention 'x' fail", "don't use 'x' unless asked", "you may mention 'x'",
+            # "don't mention 'x', 'y' is fine". So may a frequency: "don't use 'x' more than 3 times".
+            # The judge decides.
+            continue
+        indexes = [match.group(1)] + re.findall(r'\x00(\d+)\x00', match.group(2))
+        if not negated and re.search(r'\b(?:or|nor)\b', match.group(2)):
+            continue   # "include 'a' or 'b'" asks for either one; the judge decides
+        for i in indexes:   # "don't mention 'a' or 'b'" bans both, "include 'a', 'b', 'c'" needs all
+            checks.append({'kind': 'contains', 'term': terms[int(i)], 'negate': negated,
+                           'scope': 'item' if per_item else 'answer'})
         rest = rest.replace(match.group(0), ' ', 1)
     if not item_scope:
         unquoted, rest2 = _take(rest, _UNQUOTED)
@@ -263,6 +287,19 @@ def group_criteria(criteria):
     return grouped
 
 
+def _verified(check):
+    kind = check['kind']
+    if kind == 'item_count':
+        return f'number of items ({_describe(check)})'
+    if kind == 'length':
+        return f"{check['unit']} {'per item' if check['scope'] == 'item' else 'in the answer'} ({_describe(check)})"
+    if kind == 'contains':
+        where = ' in every item' if check['scope'] == 'item' and not check['negate'] else ''
+        return f"\"{check['term']}\" {'absent' if check['negate'] else 'present'}{where}"
+    return {'only_items': 'only the items, no other text', 'list_style': 'list style', 'json': 'valid JSON',
+            'unique_items': 'no duplicate items', 'unquoted': 'no quotation marks wrapping the answer'}[kind]
+
+
 def compile_rubric(criteria):
     """[{criterion_index, criterion, method, checks, judge_text, judge_scope, item_unit}] in criterion order.
 
@@ -289,9 +326,11 @@ def compile_rubric(criteria):
             log.info('rubric_parser: %d numeric clause(s) left to the judge', len(numeric))
         judge_text = None
         if semantic:
+            # Name exactly what code verified: anything left out (a limit or term the patterns could not
+            # place) stays with the judge.
             judge_text = criterion if not checks else (
-                f'{criterion} (Judge only the qualitative requirement. Counts, lengths, quoted terms, '
-                f'format and uniqueness are verified separately in code; ignore them.)')
+                f'{criterion} (These parts are verified separately in code; ignore them: '
+                f'{"; ".join(_verified(c) for c in checks)}. Judge the rest of this requirement.)')
         method = 'deterministic' if checks and not semantic else 'hybrid' if checks else 'llm_judge'
         judge_scope = None if judge_text is None else 'item' if per_item else 'answer'
         unit = re.search(rf'\b{_ITEM}\b', normalized)
