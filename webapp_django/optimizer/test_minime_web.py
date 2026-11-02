@@ -1366,6 +1366,7 @@ class MiniMeV2Tests(TestCase):
         stamped = mm.judging.configured_at(mm.judging._payload(snapshot, {}))
         self.assertLess(stamped, mm.judge_since(MiniMeTask.objects.get(pk=task.pk)))   # so its verdicts are stale
 
+    @patch.object(mm.config, 'JUDGE_MODEL', 'judge-new-default')
     def test_a_new_default_judge_starts_a_new_epoch_for_tasks_that_use_the_default(self):
         """Tasks on MiniMe's default judge switch judge when the default changes: handled like a
         Settings change. A task that chose its judge is not affected."""
@@ -1379,7 +1380,7 @@ class MiniMeV2Tests(TestCase):
         mm._ensure_judge_epoch({'task_id': str(chosen.id)})
         default.refresh_from_db(); chosen.refresh_from_db()
         self.assertNotEqual(default.settings['judge_since'], '2026-10-01T00:00:00+00:00')         # new epoch
-        self.assertEqual(default.settings['judge_epoch_model'], mm.JUDGE_MODEL)
+        self.assertEqual(default.settings['judge_epoch_model'], mm.config.JUDGE_MODEL)
         self.assertTrue(any('MiniMe\'s default' in e.get('text', '') for e in default.settings.get('log', [])))
         self.assertEqual(chosen.settings['judge_since'], '2026-10-01T00:00:00+00:00')             # unchanged
         self.assertEqual(chosen.settings['judge_epoch_model'], 'deepseek-v4.1-flash')

@@ -116,6 +116,8 @@ def _plain_error(error) -> str:
         return "API key rejected (401)"
     if "Timeout" in e or "timed out" in e:
         return "timeout"
+    if " 404" in e and ("not currently available" in e or "model" in e.lower()):
+        return "model unavailable (404): choose another model in Settings"
     return e[:200] or "unknown error"
 
 

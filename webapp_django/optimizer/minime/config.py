@@ -74,7 +74,7 @@ TASK_MODEL = "gpt-4o-mini-fast"      # writes the answers to review (default; Se
 DRAFT_MAX = 3              # statements drafted when the description gives no rules
 
 
-JUDGE_MODEL = "deepseek-v4-flash-0731-fast"  # MiniMe's judge: fast, since GEPA makes hundreds of judge calls
+JUDGE_MODEL = "deepseek-v4.1-flash"   # MiniMe's judge (0731-fast: 404 "not currently available" in production, 2026-11-02)
 
 
 

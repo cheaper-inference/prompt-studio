@@ -593,7 +593,7 @@
       <div class="row three" style="margin-bottom:18px;align-items:start">
         <div class="field" style="margin:0">
           <label>Task</label>
-          <input id="taskModel" list="allModels" value="deepseek-v4-flash-0731-fast" placeholder="pick or type" autocomplete="off"/>
+          <input id="taskModel" list="allModels" value="deepseek-v4.1-flash" placeholder="pick or type" autocomplete="off"/>
           <div class="hint">The cheap/open model you’ll deploy; runs the candidate prompts.</div>
           <div class="lat none" id="latTask"></div>
           <label style="margin-top:12px">Task model reasoning effort</label>
@@ -613,7 +613,7 @@
         </div>
         <div class="field" style="margin:0">
           <label>Judge</label>
-          <input id="judgeModel" list="allModels" value="deepseek-v4-flash-0731-fast" placeholder="pick or type" autocomplete="off"/>
+          <input id="judgeModel" list="allModels" value="deepseek-v4.1-flash" placeholder="pick or type" autocomplete="off"/>
           <div class="hint">Scores each candidate’s output against your criteria.</div>
           <div class="lat none" id="latJudge"></div>
         </div>
@@ -681,7 +681,7 @@ Keywords are unique, under 5 words, ordered by expected clicks (high to low).</t
         </div>
         <div>
           <label>Target model you’ll deploy <span style="color:var(--faint)">(= your Step 2 task model)</span></label>
-          <input id="targetName" value="deepseek-v4-flash-0731-fast" readonly title="Mirrors the Step 2 task model — the model the prompt is optimized for and the one you deploy" style="background:var(--bg);color:var(--muted)"/>
+          <input id="targetName" value="deepseek-v4.1-flash" readonly title="Mirrors the Step 2 task model — the model the prompt is optimized for and the one you deploy" style="background:var(--bg);color:var(--muted)"/>
         </div>
       </div>
       <div class="field" style="margin-top:16px"><label>Optimization budget (max metric calls)</label>

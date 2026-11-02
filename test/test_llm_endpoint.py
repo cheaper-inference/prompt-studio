@@ -1,7 +1,31 @@
 """Offline endpoint-kwargs contract tests; never instantiate an inference client."""
 import unittest
 
-from llm_endpoint import Endpoint
+from llm_endpoint import DEFAULT_MODEL, Endpoint, configure
+
+
+class ModelDefaultTests(unittest.TestCase):
+    def test_endpoint_and_configuration_use_available_model_defaults(self):
+        self.assertEqual(DEFAULT_MODEL, "deepseek-v4.1-flash")
+        endpoints = (
+            Endpoint(base_url="http://127.0.0.1:1234/v1", api_key="fixture-key"),
+            configure(base_url="http://127.0.0.1:1234/v1", api_key="fixture-key",
+                      env_file=None, set_openai_env=False),
+        )
+        for endpoint in endpoints:
+            with self.subTest(endpoint=type(endpoint).__name__):
+                self.assertEqual(endpoint.task_model, DEFAULT_MODEL)
+                self.assertEqual(endpoint.judge_model, DEFAULT_MODEL)
+                self.assertEqual(endpoint.reflection_model, DEFAULT_MODEL)
+
+    def test_explicit_model_choices_are_preserved(self):
+        endpoint = configure(base_url="http://127.0.0.1:1234/v1", api_key="fixture-key",
+                             task_model="custom-task", judge_model="custom-judge",
+                             reflection_model="custom-reflection",
+                             env_file=None, set_openai_env=False)
+        self.assertEqual(endpoint.task_model, "custom-task")
+        self.assertEqual(endpoint.judge_model, "custom-judge")
+        self.assertEqual(endpoint.reflection_model, "custom-reflection")
 
 
 class ReflectionKwargsTests(unittest.TestCase):

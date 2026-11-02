@@ -16,8 +16,8 @@ that do.
     ep = configure()                       # reads env, sets OPENAI_* as a side effect
 
     ep.client                              # openai.OpenAI, explicitly pointed
-    ep.task_model                          # "deepseek-v4-flash-0731-fast"
-    ep.reflection_uri                      # "openai:/deepseek-v4-flash-0731-fast"
+    ep.task_model                          # "deepseek-v4.1-flash"
+    ep.reflection_uri                      # "openai:/deepseek-v4.1-flash"
     ep.lm_kwargs()                         # -> MetaPromptOptimizer(lm_kwargs=...)
     ep.gepa_kwargs()                       # -> GepaPromptOptimizer(gepa_kwargs=...)
 
@@ -58,7 +58,7 @@ def time_calls(client, model: str, messages: list[dict], n: int = 5,
 
 DEFAULT_KEY_VAR = "CHEAPERINFERENCE_API_KEY"
 DEFAULT_URL_VAR = "CHEAPERINFERENCE_BASE_URL"
-DEFAULT_MODEL = "deepseek-v4-flash-0731-fast"
+DEFAULT_MODEL = "deepseek-v4.1-flash"
 
 
 class EndpointConfigError(RuntimeError):
