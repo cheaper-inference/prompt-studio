@@ -374,6 +374,124 @@ def classify_rewriter_failure(exc: BaseException) -> "OptimizerFailed":
     return OptimizerFailed("rewriter_failed", "The optimizer couldn't rewrite your prompt. Run it again.", detail)
 
 
+# ---------------------------------------------------------------------------
+# Timed-out / failed model calls during a GEPA run (few-shot, training data)
+# ---------------------------------------------------------------------------
+# MLflow catches a failed task call and judges its error text as if it were the answer, while a
+# failed judge call escapes and ends the whole run (production, Nov 8: one gpt-5-nano judge timeout
+# failed a 3-row few-shot run). Instead a failed call scores that example 0 with a reason, and the
+# run stops with a clear message only when a model keeps failing.
+TASK_CALL_FAILED = "[no answer: the task model call timed out or failed]"
+_TRANSIENT_ERRORS = ("APITimeoutError", "Timeout", "TimeoutError", "TimeoutException", "ReadTimeout",
+                     "APIConnectionError", "InternalServerError", "ServiceUnavailableError")
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """A timeout, dropped connection or 5xx anywhere in the cause chain: worth scoring as a miss,
+    not a reason to end the run. Matched by class name so no provider SDK is imported."""
+    seen: BaseException | None = exc
+    for _ in range(6):
+        if seen is None:
+            return False
+        if any(cls.__name__ in _TRANSIENT_ERRORS for cls in type(seen).__mro__):
+            return True
+        status = getattr(seen, "status_code", None)
+        if isinstance(status, int) and status >= 500:
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+class _CallGuard:
+    """Counts each role's model calls in one run. A role stops the run once it has failed at least
+    MIN_FAILURES times and either most of its calls failed or the last MIN_FAILURES all did."""
+
+    MIN_FAILURES = 5
+
+    def __init__(self, models: dict[str, str], timeout: int | None) -> None:
+        import threading
+        self.models, self.timeout = models, timeout
+        self.counts = {role: {"calls": 0, "failed": 0, "streak": 0} for role in models}
+        self.stopped: OptimizerFailed | None = None
+        self._lock = threading.Lock()
+
+    def ok(self, role: str) -> None:
+        with self._lock:
+            c = self.counts[role]
+            c["calls"] += 1
+            c["streak"] = 0
+
+    def failed(self, role: str, exc: BaseException) -> None:
+        with self._lock:
+            c = self.counts[role]
+            c["calls"] += 1
+            c["failed"] += 1
+            c["streak"] += 1
+            _logger.warning("%s model call failed (%d of %d so far): %s: %s", role, c["failed"], c["calls"],
+                            type(exc).__name__, str(exc)[:200])
+            if self.stopped is None and c["failed"] >= self.MIN_FAILURES and (
+                    2 * c["failed"] > c["calls"] or c["streak"] >= self.MIN_FAILURES):
+                limit = f" within {self.timeout} s" if self.timeout else ""
+                self.stopped = OptimizerFailed(
+                    "model_timeout",
+                    f"The {role} model ({self.models[role]}) didn't answer{limit} on {c['failed']} of "
+                    f"{c['calls']} calls, so the run stopped. Try again, or choose a faster {role} model.",
+                    f"{type(exc).__name__}: {exc}")
+
+    def check(self) -> None:
+        if self.stopped is not None:
+            raise self.stopped
+
+    def summary(self) -> dict[str, int]:
+        with self._lock:
+            return {role: c["failed"] for role, c in self.counts.items() if c["failed"]}
+
+
+def _guard_predict(predict_fn: Callable[..., str], guard: _CallGuard) -> Callable[..., str]:
+    """A task call that times out or fails answers TASK_CALL_FAILED instead of an error text."""
+    import functools
+
+    @functools.wraps(predict_fn)
+    def guarded(**inputs: Any) -> str:
+        try:
+            answer = predict_fn(**inputs)
+        except Exception as exc:  # noqa: BLE001 - only transient failures are absorbed
+            if not _is_transient(exc):
+                raise
+            guard.failed("task", exc)
+            return TASK_CALL_FAILED
+        guard.ok("task")
+        return answer
+    return guarded
+
+
+def _guard_scorer(original: Any, guard: _CallGuard) -> Any:
+    """The scorer, except: no judge call for a failed task answer (score 0), a judge call that
+    times out or fails scores 0 with a reason, and a stopped run raises its OptimizerFailed."""
+    from mlflow.entities import Feedback
+    from mlflow.genai.scorers import scorer
+
+    counted = getattr(original, "name", "") != "output_constraints"   # deterministic: no model call
+
+    @scorer(name=original.name)
+    def guarded(inputs: Any = None, outputs: Any = None, expectations: Any = None, trace: Any = None):
+        guard.check()
+        if outputs == TASK_CALL_FAILED:
+            return Feedback(value=0.0, rationale="No answer to score: the task model call timed out or failed.")
+        try:
+            result = original.run(inputs=inputs, outputs=outputs, expectations=expectations, trace=trace)
+        except Exception as exc:  # noqa: BLE001 - only transient failures are absorbed
+            if not (counted and _is_transient(exc)):
+                raise
+            guard.failed("judge", exc)
+            guard.check()
+            return Feedback(value=0.0, rationale="Not scored: the judge model call timed out or failed.")
+        if counted:
+            guard.ok("judge")
+        return result
+    return guarded
+
+
 def _set_tracing(on: bool) -> bool:
     """Set MLflow tracing on or off and return the previous state, so the caller can restore it.
 
@@ -705,6 +823,12 @@ class PromptOptimizer:
         if config.mode is Mode.TRAINING_DATA:
             role_by_model.setdefault(
                 config.judge_model or self.endpoint.judge_model, "judge")
+        guard = None
+        if config.mode is not Mode.ZERO_SHOT:
+            guard = _CallGuard({"task": task_model, "judge": config.judge_model or self.endpoint.judge_model},
+                               getattr(config, "request_timeout", None))
+            predict_fn = _guard_predict(predict_fn, guard)
+            scorers = [_guard_scorer(s, guard) for s in scorers]
         hook = _install_litellm_meter(self._usage, role_by_model)
         tracing_before = _set_tracing(config.enable_tracking or bool(config.custom_scorers))
         try:
@@ -716,9 +840,15 @@ class PromptOptimizer:
                 scorers=scorers,
                 enable_tracking=config.enable_tracking,
             )
+        except Exception:
+            if guard is not None and guard.stopped is not None:
+                raise guard.stopped from None   # the clear message, whatever wrapped it on the way up
+            raise
         finally:
             _remove_litellm_meter(hook)
             _set_tracing(tracing_before)        # only this run changed it
+        if guard is not None and guard.summary():
+            _logger.warning("run finished with failed model calls scored 0: %s", guard.summary())
 
         out = self._build_result(config, registered, task_model, result)
         out.enforced = config.output_constraints or None

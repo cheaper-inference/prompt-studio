@@ -136,11 +136,6 @@
   .lat.none{color:var(--faint)}
   .lat a{color:var(--accent);text-decoration:none}
   .lat a:hover{text-decoration:underline}
-  .eta{margin-top:8px;font-size:12.5px;line-height:1.4}
-  .eta .meta{color:var(--muted)}
-  .eta.none{color:var(--faint)}
-  .eta a{color:var(--accent);text-decoration:none}
-  .eta a:hover{text-decoration:underline}
   .field{margin-bottom:18px}
   .field:last-child{margin-bottom:0}
   .row{display:grid;gap:16px}
@@ -688,7 +683,6 @@ Keywords are unique, under 5 words, ordered by expected clicks (high to low).</t
         <input id="budget" type="number" value="30" min="4" style="max-width:300px"/>
         <div class="hint">Higher = more thorough search, more cost. 20–40 is a good starting range.</div>
         <div class="hint" id="budgetHint" style="margin-top:6px"></div>
-        <div class="eta none" id="etaOpt"></div>
       </div>
 
       <!-- output constraints (all approaches) — collapsed by default -->
@@ -754,7 +748,7 @@ Keywords are unique, under 5 words, ordered by expected clicks (high to low).</t
 
   <!-- PROGRESS -->
   <div id="progressCard" class="card" style="display:none;margin-top:16px">
-    <div class="sec-h"><h2 class="title" style="margin:0">Optimizing…</h2><span id="elapsed">0:00</span><span id="etaRun" class="meta" style="margin-left:12px;font-family:var(--mono);font-size:13px"></span></div>
+    <div class="sec-h"><h2 class="title" style="margin:0">Optimizing…</h2><span style="font-family:var(--mono);color:var(--muted);font-size:14px">Elapsed <span id="elapsed">0:00</span></span></div>
     <div class="pbar"><div class="pbar-fill"></div></div>
     <div class="curstage"><span class="spin"></span><span id="curStage">Submitting…</span></div>
     <div class="stagelog" id="stageLog"></div>
@@ -876,12 +870,11 @@ Keywords are unique, under 5 words, ordered by expected clicks (high to low).</t
 
       <div class="callout tip" style="margin-top:16px"><b>Heads up:</b> this is <b>two full optimization runs</b> — roughly double the time and tokens of one Optimize. Per-arm progress shows below.</div>
       <div id="abBudgetHint" class="hint" style="margin:10px 0 0"></div>
-      <div class="eta none" id="etaAb"></div>
       <div style="margin-top:16px"><button class="btn primary" id="abRun">Run A/B experiment →</button></div>
     </div>
 
     <div class="card" id="abProgress" style="display:none;margin-top:16px">
-      <div class="curstage"><div class="spin"></div><span id="abStage">Starting…</span><span id="abEta" class="meta" style="margin-left:auto;font-family:var(--mono);font-size:13px"></span><span style="margin-left:12px;font-family:var(--mono);color:var(--muted)" id="abElapsed"></span></div>
+      <div class="curstage"><div class="spin"></div><span id="abStage">Starting…</span><span style="margin-left:auto;font-family:var(--mono);color:var(--muted)">Elapsed <span id="abElapsed"></span></span></div>
       <div class="pbar"><div class="pbar-fill"></div></div>
       <div class="stagelog" id="abLog"></div>
     </div>
@@ -1185,7 +1178,7 @@ function showStep(n){
   if(last) $("#optimizeBtn").disabled = !ENDPOINT_OK;   // can't run a live job with no endpoint
   $("#nextBtn").disabled = (n===1 && !MODE);
   if(n===3) syncStep3();
-  if(n===4){ updateRecap(); budgetHint(); updateEtaOpt(); }
+  if(n===4){ updateRecap(); budgetHint(); }
   $("#results").style.display=(n===LAST_STEP && HAS_RESULT)?"block":"none";   // only on Step 4
   window.scrollTo({top:0,behavior:'smooth'});
 }
@@ -1384,7 +1377,6 @@ $("#optimizeBtn").onclick=async()=>{
   $("#optimizeBtn").disabled=true; HAS_RESULT=false; $("#results").style.display="none";
   $("#progressCard").style.display="block"; $("#stageLog").innerHTML=""; LAST_STAGE="";
   $("#curStage").textContent="Submitting…"; startTimer();
-  {const _e=optimizeEta($("#taskModel").value,$("#judgeModel").value,$("#reflectionModel").value,+$("#budget").value); $("#etaRun").innerHTML=_e?("ETA "+fmtRange(_e.lo,_e.hi)):"ETA —";}
   $("#progressCard").scrollIntoView({behavior:"smooth",block:"nearest"});
   try{
     const r=await fetch("/api/optimize",{method:"POST",headers:POST_HEADERS,body:JSON.stringify(payload())});
@@ -1478,7 +1470,7 @@ function render(j){
 const ANCHOR_TIMERS={};
 function anchProgHTML(prefix){
   return `<div class="card" id="${prefix}Card" style="display:none;margin-top:14px">
-    <div class="sec-h"><h2 class="title" style="margin:0">Optimizing benchmark anchor (frontier model)…</h2><span id="${prefix}Eta" class="meta" style="margin-left:auto;font-family:var(--mono);font-size:13px"></span><span id="${prefix}Elapsed" style="margin-left:12px;font-family:var(--mono);color:var(--muted)">0:00</span></div>
+    <div class="sec-h"><h2 class="title" style="margin:0">Optimizing benchmark anchor (frontier model)…</h2><span style="margin-left:auto;font-family:var(--mono);color:var(--muted)">Elapsed <span id="${prefix}Elapsed">0:00</span></span></div>
     <div class="pbar"><div class="pbar-fill"></div></div>
     <div class="curstage"><span class="spin"></span><span id="${prefix}Stage">Starting…</span></div>
     <div class="stagelog" id="${prefix}Log"></div>
@@ -1518,7 +1510,6 @@ $("#anchorBtn")&&($("#anchorBtn").onclick=async()=>{
   if(!LAST_OPT) return;
   $("#anchorBtn").disabled=true;
   $("#anchorProgWrap").innerHTML=anchProgHTML("anchor"); anchStart("anchor");
-  {const _e=optimizeEta($("#frontierName").value,$("#judgeModel").value,$("#reflectionModel").value,+$("#budget").value); const _s=$("#anchorEta"); if(_s) _s.innerHTML=_e?("ETA "+fmtRange(_e.lo,_e.hi)):"ETA —";}
   try{
     const r=await fetch("/api/anchor",{method:"POST",headers:POST_HEADERS,body:JSON.stringify({...payload(), _target:LAST_OPT, _run_id:LAST_RUN_ID})});
     const {job_id}=await r.json();
@@ -1601,7 +1592,7 @@ $$(".side .navitem").forEach(n=>n.addEventListener("click",()=>{
   const v=n.dataset.view;
   $$(".side .navitem").forEach(x=>x.classList.toggle("active",x===n));
   ["optimize","ab","standings","history","minime"].forEach(k=>$("#view-"+k).classList.toggle("hidden", v!==k));
-  if(v==="ab"){ loadBaselines(); abRenderControl(); abSyncHoldout(); abBudgetHint(); updateEtaAb(); }
+  if(v==="ab"){ loadBaselines(); abRenderControl(); abSyncHoldout(); abBudgetHint(); }
   if(v==="standings"){ loadStandings(); const b=$("#stdRun"); if(b) b.disabled=!ENDPOINT_OK; }
   if(v==="history") loadHistory();
   if(v==="minime") mmLoadTasks($("#mmTask").value||undefined).catch(()=>{});
@@ -1636,7 +1627,7 @@ $("#abBaseline")&&($("#abBaseline").onchange=()=>{
   $("#abControl").innerHTML=`<div class="hint">Loading baseline…</div>`;
   fetch("/api/runs/"+id).then(r=>r.json()).then(d=>{
     AB_CONTROL=d.config||null; $("#abReflA").value="";   // reseed arm A from the new control
-    abRenderControl(); abSyncHoldout(); abBudgetHint(); updateEtaAb();
+    abRenderControl(); abSyncHoldout(); abBudgetHint();
   }).catch(e=>{ $("#abControl").innerHTML=`<div class="hint">Couldn't load run: ${escHtml(""+e)}</div>`; });
 });
 function abRenderControl(){
@@ -1814,7 +1805,6 @@ $("#abRun").onclick=async()=>{
   }
   $("#abRun").disabled=true; $("#abResults").style.display="none";
   $("#abProgress").style.display="block"; $("#abLog").innerHTML=""; AB_LASTSTAGE=""; $("#abStage").textContent="Submitting…"; abStartTimer();
-  {const _e=abEtaRange(); $("#abEta").innerHTML=_e?("ETA "+fmtRange(_e.lo,_e.hi)):"ETA —";}
   try{
     const p={...AB_CONTROL, lever, arms, holdout:collectHoldout()};
     const r=await fetch("/api/experiment",{method:"POST",headers:POST_HEADERS,body:JSON.stringify(p)});
@@ -1897,7 +1887,6 @@ function renderRunDetail(d){
     const rr=res.result||{};
     $("#histAnchorBtn").onclick=()=>{
       const btn=$("#histAnchorBtn"); btn.disabled=true; anchStart("histAnchor");
-      {const _e=optimizeEta((cfg.economics||{}).frontier_name,cfg.judge_model,cfg.reflection_model,+cfg.max_metric_calls); const _s=$("#histAnchorEta"); if(_s) _s.innerHTML=_e?("ETA "+fmtRange(_e.lo,_e.hi)):"ETA —";}
       const target={model:rr.task_model,score:rr.final_score,prompt_chars:rr.prompt_chars,serving:res.serving};
       fetch("/api/anchor",{method:"POST",headers:POST_HEADERS,body:JSON.stringify({...cfg,_target:target,_run_id:d.id})})
         .then(x=>x.json()).then(j=>{ if(!j.job_id){anchStop("histAnchor");anchStage("histAnchor","Couldn't start.");btn.disabled=false;return;} anchorPollG(j.job_id,"histAnchor","#histAnchorBtn","histTradeoff"); })
@@ -1958,7 +1947,7 @@ function loadStandings(){
   fetch("/api/standings").then(r=>r.json()).then(j=>{
     $("#stdLast").textContent=(j.last_run?("Last measured "+agoStr(j.last_run)):"No measurements yet")
       +(j.hidden?` · ${j.hidden} hidden (errored)`:"");
-    STD_DATA=j.rows||[]; STD_LOADED=true; renderStd(); refreshRoleLatency(); updateEtaOpt(); updateEtaAb();
+    STD_DATA=j.rows||[]; STD_LOADED=true; renderStd(); refreshRoleLatency();
   }).catch(e=>{ STD_DATA=[]; $("#stdBody").innerHTML=`<tr><td colspan="4" class="hint">Couldn't load standings: ${escHtml(""+e)}. (Have you run <code>python manage.py migrate</code>?)</td></tr>`; });
 }
 function runDiagnostics(){
@@ -1998,61 +1987,12 @@ function refreshRoleLatency(){
   for(const id in map){ const el=$("#"+id); if(!el) continue;
     const [inp,role]=map[id]; const r=roleLatHTML(($("#"+inp)||{}).value, role);
     el.innerHTML=r.html; el.className="lat"+(r.none?" none":""); }
-  updateEtaOpt();
 }
 ["taskModel","reflectionModel","judgeModel"].forEach(id=>{ const e=$("#"+id);
   if(e){ e.addEventListener("input",refreshRoleLatency); e.addEventListener("change",refreshRoleLatency); } });
 document.addEventListener("click",ev=>{ const a=ev.target.closest("[data-go]"); if(!a) return;
   ev.preventDefault(); let t=null; $$(".side .navitem").forEach(x=>{ if(x.dataset.view===a.dataset.go) t=x; }); if(t) t.click(); });
 
-/* ---------- run-time ETA (measured per-role latency + GEPA budget) ---------- */
-const REFLECT_MINIBATCH=3;   // GEPA default: ~1 reflection call per minibatch of metric calls
-function roleCell(model,role){ if(!STD_LOADED||!model) return null;
-  const r=STD_DATA.find(x=>(x.model||"").toLowerCase()===(model||"").trim().toLowerCase());
-  const c=r?r.roles[role]:null; return (c&&c.ok&&c.mean_s!=null)?c:null; }
-function fmtRange(lo,hi){ if(lo==null) return null;
-  if(hi<lo){ const t=lo; lo=hi; hi=t; }   // low mark first, always
-  const unit = hi<90?["s",1] : (hi/60<90?["min",60]:["h",3600]);
-  const fmt = x=>{ const v=x/unit[1]; return unit[1]===1?Math.round(v):(v<10?(+v.toFixed(1)):Math.round(v)); };
-  return `~${fmt(lo)}–${fmt(hi)} ${unit[0]}`; }
-function optimizeEta(task,judge,refl,budget){   // {lo,hi} seconds, or null if any role unmeasured
-  const t=roleCell(task,"task"), j=roleCell(judge,"judge"), f=roleCell(refl,"reflection");
-  if(!t||!j||!f||!(budget>0)) return null;
-  const rc=Math.ceil(budget/REFLECT_MINIBATCH);
-  return { lo: budget*t.mean_s + budget*j.mean_s + rc*f.mean_s,
-           hi: budget*t.p90_s  + budget*j.p90_s  + rc*f.p90_s }; }
-const etaTip="Rough estimate from measured per-role latency (Model Standings) and the GEPA budget: "
-  +"budget×task + budget×judge + ⌈budget/3⌉×reflection. "
-  +"Low end uses each role's mean, high end its p90. Assumes calls run sequentially; task reasoning "
-  +"effort and prompt length aren't reflected — treat it as a guide, not a clock.";
-function etaLineHTML(e,label){
-  if(!e) return `<b>${label||"Estimated run time"}</b> <span class="meta">—</span> <span class="meta" style="margin-left:6px"><a href="#" data-go="standings">measure in Standings</a></span>`;
-  return `<b>${label||"Estimated run time"}</b> ${fmtRange(e.lo,e.hi)} <span class="meta" title="${escAttr(etaTip)}" style="cursor:help">ⓘ</span>`; }
-function updateEtaOpt(){ const el=$("#etaOpt"); if(!el) return;
-  if(!MODE){ el.innerHTML=""; el.className="eta none"; return; }
-  const e=optimizeEta($("#taskModel").value,$("#judgeModel").value,$("#reflectionModel").value,+$("#budget").value);
-  el.innerHTML=etaLineHTML(e); el.className="eta"+(e?"":" none"); }
-function abEtaRange(){
-  if(!AB_CONTROL) return null;
-  const c=AB_CONTROL, B=+(c.max_metric_calls)||0;
-  const H=(typeof collectHoldout==="function"?collectHoldout().length:0);
-  const lever=$("#abLever")?$("#abLever").value:"";
-  const reflA=lever==="reflection_model"?(($("#abReflA")||{}).value||c.reflection_model):c.reflection_model;
-  const reflB=lever==="reflection_model"?(($("#abReflB")||{}).value||c.reflection_model):c.reflection_model;
-  const eA=optimizeEta(c.task_model,c.judge_model,reflA,B), eB=optimizeEta(c.task_model,c.judge_model,reflB,B);
-  if(!eA||!eB) return null;
-  const t=roleCell(c.task_model,"task"), j=roleCell(c.judge_model,"judge");
-  const hlo=(t&&j)?H*(t.mean_s+j.mean_s):0, hhi=(t&&j)?H*(t.p90_s+j.p90_s):0;
-  return { lo:eA.lo+eB.lo+2*hlo, hi:eA.hi+eB.hi+2*hhi, H }; }
-function updateEtaAb(){ const el=$("#etaAb"); if(!el) return;
-  if(!AB_CONTROL){ el.innerHTML=""; el.className="eta none"; return; }
-  const e=abEtaRange();
-  if(!e){ el.innerHTML=etaLineHTML(null,"Estimated experiment time"); el.className="eta none"; return; }
-  el.innerHTML=`<b>Estimated experiment time</b> ${fmtRange(e.lo,e.hi)} <span class="meta">(2 arms${e.H?` + held-out ×${e.H}`:""})</span> <span class="meta" title="${escAttr(etaTip)}" style="cursor:help">ⓘ</span>`;
-  el.className="eta"; }
-["taskModel","reflectionModel","judgeModel","budget"].forEach(id=>{ const e=$("#"+id); if(e) e.addEventListener("input",updateEtaOpt); });
-["abLever","abReflA","abReflB","abCap"].forEach(id=>{ const e=$("#"+id); if(e) e.addEventListener("input",updateEtaAb); });
-$("#abHoldTable")&&$("#abHoldTable").addEventListener("input",updateEtaAb);
 
 /* ---------- init ---------- */
 (async function(){
