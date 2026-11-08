@@ -18,7 +18,12 @@ tiktoken==0.13.0        # token counting for the cost model
 # LLM transport for MLflow's judge and GEPA's reflection calls. Not auto-installed
 # by mlflow, so it must be listed explicitly. Lock it to your working version:
 #   pip show litellm   ->   then set  litellm==<that version>  below.
-litellm>=1.55
+# Pinned: an unpinned litellm upgraded on every deploy (missing tenacity, then a logging-thread import
+# deadlock with MLflow). Upgrade deliberately and run the full suite; see LITELLM_LAZY_PROXY_MODULE.
+litellm==1.108.3
+# litellm imports tenacity to retry a timed-out or 5xx call but does not install it; without it
+# the retry itself crashes (ModuleNotFoundError) instead of retrying.
+tenacity==9.1.4
 
 # --- web app (Django). Omit if you only run the library / CLI examples. ---
 django==5.2.17

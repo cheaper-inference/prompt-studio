@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Sequence
@@ -68,6 +69,14 @@ from typing import Any, Callable, Sequence
 from llm_endpoint import Endpoint, configure
 
 _logger = logging.getLogger(__name__)
+
+# Deadlock guard (production, Nov 8: few-shot workers hung for hours). After every call, litellm's
+# logging thread lazily imports this proxy-only module; the import goes through MLflow's import-hook
+# finder and waits on its lock, while MLflow's evaluation holds that lock and waits on the import lock.
+# Marking the module absent makes litellm's import fail at once (no import lock, no finders); litellm
+# already treats that as an SDK-only install (no auto-router savings figure). Does not import litellm.
+LITELLM_LAZY_PROXY_MODULE = "litellm.proxy.spend_tracking.savings"
+sys.modules.setdefault(LITELLM_LAZY_PROXY_MODULE, None)
 
 
 # ---------------------------------------------------------------------------
@@ -336,8 +345,11 @@ _FAILURE_RULES = (
      rf"|{_STATUS}402\b",
      "Your wallet balance can't cover this optimization. Add credit and run it again."),
     ("rewriter_unavailable", rf"{_STATUS}40[134]\b|authenticat|unauthori[sz]ed|forbidden|permission|not allowed"
-     r"|notfounderror|model[^.]{0,40}not (?:found|available|supported)",
+     r"|(?<!module)notfounderror|model[^.]{0,40}not (?:found|available|supported)",   # not ModuleNotFoundError
      "Your key can't use the rewriter model. Check the key's model access and try again."),
+    ("rewriter_failed", rf"timeout|timed out|{_STATUS}5\d\d\b|internalservererror|serviceunavailable"
+     r"|apiconnectionerror|connection (?:error|reset|refused|aborted)",
+     "The rewriter timed out or failed on its side. Run it again; a very long prompt can take longer."),
     ("rewrite_rejected", r"parse reflection model response|invalid format|template variables mismatch"
      r"|unexpected prompts found in improved prompts|prompts missing from improved prompts|must be a string",
      "The rewriter's answer was unusable (for example, a {{variable}} was dropped). Run it again."),
@@ -405,6 +417,9 @@ def strict_metaprompt_optimizer(**kwargs: Any):
             return PromptOptimizerOutput(optimized_prompts=improved, initial_eval_score=None, final_eval_score=None)
 
     return StrictMetaPromptOptimizer(**kwargs)
+
+
+ZERO_SHOT_RETRIES = 2   # retries of a timed-out, 5xx or rate-limited zero-shot rewrite
 
 
 class ConfigError(ValueError):
@@ -1373,9 +1388,16 @@ class PromptOptimizer:
         if config.mode is Mode.ZERO_SHOT:
             # No output limit here: MLflow's _call_llm sends its own max_completion_tokens
             # (_DEFAULT_MAX_TOKENS), and a second limit key makes the CI proxy reject the call.
+            # MLflow retries a timed-out or 5xx rewrite 5 times; with the 90 s timeout a failing run would
+            # hang for about 9 minutes. Two retries, and none for errors that will not change on a retry.
+            from litellm import RetryPolicy
+            # A 503 raises ServiceUnavailableError, which is not an InternalServerError: it needs its own count.
+            retries = RetryPolicy(TimeoutErrorRetries=ZERO_SHOT_RETRIES, InternalServerErrorRetries=ZERO_SHOT_RETRIES,
+                                  ServiceUnavailableErrorRetries=ZERO_SHOT_RETRIES,
+                                  RateLimitErrorRetries=ZERO_SHOT_RETRIES)
             return strict_metaprompt_optimizer(
                 reflection_model=reflection_uri,
-                lm_kwargs=self.endpoint.lm_kwargs(**refl_extra),
+                lm_kwargs=self.endpoint.lm_kwargs(**refl_extra, retry_policy=retries),
                 guidelines=config.task_description,
             )
 

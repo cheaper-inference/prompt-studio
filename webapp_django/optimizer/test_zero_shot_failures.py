@@ -32,6 +32,119 @@ class ZeroShotFailureTests(SimpleTestCase):
             self.assertEqual(po.classify_rewriter_failure(MlflowException(mlflow_text)).code, "rewrite_rejected")
         self.assertEqual(po.classify_rewriter_failure(TimeoutError("read timed out")).code, "rewriter_failed")
 
+    def test_failed_retry_is_not_reported_as_key_access(self):
+        """Production, Nov 4: a timed-out rewrite whose retry crashed (tenacity missing) said
+        "Your key can't use the rewriter model" because ModuleNotFoundError matched NotFoundError."""
+        call = MlflowException("Failed to call reflection model openai:/claude-opus-4.8: tenacity import failed "
+                               "please run `pip install tenacity`. ErrorNo module named 'tenacity'")
+        missing = ModuleNotFoundError("No module named 'tenacity'")
+        missing.__cause__ = Exception("litellm.Timeout: APITimeoutError - Request timed out.")
+        call.__cause__ = missing
+        failure = po.classify_rewriter_failure(call)
+        self.assertEqual(failure.code, "rewriter_failed")
+        self.assertIn("timed out", failure.message)
+        for text in ("litellm.InternalServerError: OpenAIException - boom", "Error code: 503 - overloaded",
+                     "APIConnectionError: Connection error.", "Request timed out."):
+            failure = po.classify_rewriter_failure(Exception(text))
+            self.assertEqual((failure.code, "timed out" in failure.message), ("rewriter_failed", True), text)
+        # The API's own not-found error still means the key can't use the model.
+        self.assertEqual(po.classify_rewriter_failure(
+            Exception("litellm.NotFoundError: OpenAIException - model x")).code, "rewriter_unavailable")
+
+    def test_zero_shot_rewrite_retries_are_capped(self):
+        """Zero-shot rewrites send a RetryPolicy capping retries at ZERO_SHOT_RETRIES (MLflow's default is 5)."""
+        endpoint = mock.Mock(uri=lambda model: f"openai:/{model}", reflection_model="m",
+                             lm_kwargs=lambda **extra: extra)
+        optimizer = po.PromptOptimizer.__new__(po.PromptOptimizer)
+        optimizer.endpoint = endpoint
+        config = po.OptimizationConfig(name="z", prompts="Say hi", mode=po.Mode.ZERO_SHOT, task_description="greet")
+        policy = optimizer._build_optimizer(config).lm_kwargs["retry_policy"]
+        self.assertEqual((policy.TimeoutErrorRetries, policy.InternalServerErrorRetries),
+                         (po.ZERO_SHOT_RETRIES, po.ZERO_SHOT_RETRIES))
+        self.assertFalse(policy.AuthenticationErrorRetries)
+
+    def test_timed_out_rewrite_is_sent_at_most_retries_plus_one_times(self):
+        """End to end through MLflow and litellm (nothing mocked above the HTTP socket): a local
+        server that never answers within the timeout sees 2..ZERO_SHOT_RETRIES + 1 requests."""
+        import threading
+        import time
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        import litellm
+
+        hits = []
+
+        class Slow(BaseHTTPRequestHandler):
+            def do_POST(self):   # noqa: N802 (http.server API)
+                """Count the request, then answer only after the client has timed out."""
+                hits.append(time.monotonic())
+                time.sleep(2)
+                try:
+                    self.send_response(500)
+                    self.end_headers()
+                except OSError:
+                    pass   # the client already gave up
+
+            def log_message(self, *args):
+                """Keep the test output quiet."""
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = mock.Mock(uri=lambda model: f"openai:/{model}", reflection_model="m",
+                             lm_kwargs=lambda **extra: {"api_base": base, "api_key": "test", **extra})
+        optimizer = po.PromptOptimizer.__new__(po.PromptOptimizer)
+        optimizer.endpoint = endpoint
+        config = po.OptimizationConfig(name="z", prompts="Say hi", mode=po.Mode.ZERO_SHOT, task_description="greet",
+                                       request_timeout=1)
+        rewriter = optimizer._build_optimizer(config)
+        with self.assertRaises(MlflowException) as caught:
+            rewriter._call_reflection_model("Rewrite: Say hi", False)
+        # The client's timeout, not the server's late 500, must be what failed (litellm re-raises the last attempt's error).
+        self.assertIsInstance(caught.exception.__cause__, litellm.Timeout)
+        self.assertGreater(len(hits), 1)
+        self.assertLessEqual(len(hits), po.ZERO_SHOT_RETRIES + 1)
+
+    def test_retry_counts_per_error_as_litellm_resolves_them(self):
+        """litellm picks the retry count by exception class: 500, 503, timeouts and rate limits get
+        ZERO_SHOT_RETRIES; a bad key is not retried (DefaultRetries is unset)."""
+        import litellm
+        from litellm.router_utils.get_retry_from_policy import get_num_retries_from_retry_policy
+
+        endpoint = mock.Mock(uri=lambda model: f"openai:/{model}", reflection_model="m",
+                             lm_kwargs=lambda **extra: extra)
+        optimizer = po.PromptOptimizer.__new__(po.PromptOptimizer)
+        optimizer.endpoint = endpoint
+        config = po.OptimizationConfig(name="z", prompts="Say hi", mode=po.Mode.ZERO_SHOT, task_description="greet")
+        policy = optimizer._build_optimizer(config).lm_kwargs["retry_policy"]
+        args = dict(message="x", llm_provider="openai", model="m")
+        cases = {"500": (litellm.InternalServerError(**args), po.ZERO_SHOT_RETRIES),
+                 "503": (litellm.ServiceUnavailableError(**args), po.ZERO_SHOT_RETRIES),
+                 "timeout": (litellm.Timeout(**args), po.ZERO_SHOT_RETRIES),
+                 "429": (litellm.RateLimitError(**args), po.ZERO_SHOT_RETRIES),
+                 "401": (litellm.AuthenticationError(**args), None)}
+        for name, (error, expected) in cases.items():
+            self.assertEqual(get_num_retries_from_retry_policy(exception=error, retry_policy=policy), expected, name)
+
+    def test_litellm_logging_thread_does_not_import_through_mlflow_hooks(self):
+        """The module litellm's logging thread imports after every call is marked absent, so the
+        import fails at once instead of taking the import lock (the Nov 8 worker deadlock)."""
+        import importlib
+        import sys
+
+        self.assertIn(po.LITELLM_LAZY_PROXY_MODULE, sys.modules)
+        self.assertIsNone(sys.modules[po.LITELLM_LAZY_PROXY_MODULE])
+        with self.assertRaises(ImportError):
+            importlib.import_module(po.LITELLM_LAZY_PROXY_MODULE)
+        # The litellm code path itself: it catches the ImportError and reports no savings.
+        from litellm.litellm_core_utils import litellm_logging
+        self.assertIsNone(litellm_logging._autorouter_savings_for_payload(
+            request_metadata={}, model="m", custom_llm_provider="openai", model_id=None,
+            usage_object=None, cost_breakdown=None))
+
     def test_rewriter_reply_text_does_not_look_like_a_transport_failure(self):
         """MLflow's parse error quotes the rewriter's reply; words in it must not decide the code."""
         reply = "Sure! Handle HTTP 402 and permission errors, and say when the model is not available."
