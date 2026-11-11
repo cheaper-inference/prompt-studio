@@ -70,6 +70,94 @@ class RubricParserTests(SimpleTestCase):
         for criterion, expected in cases.items():
             self.assertEqual(checks(criterion), ('deterministic', expected), criterion)
 
+    def test_negated_one_sided_limits_flip_instead_of_inverting(self):
+        def length(low, high, unit='words'):
+            return [{'kind': 'length', 'unit': unit, 'scope': 'answer', 'min': low, 'max': high}]
+        def count(low, high):
+            return [{'kind': 'item_count', 'min': low, 'max': high}]
+        cases = {'The answer should not have more than 3 bullet points.': count(None, 3),
+                 'No fewer than 3 items.': count(3, None),
+                 'Do not write fewer than 3 items.': count(3, None),
+                 'No less than 20 words.': length(20, None),
+                 'Must not have less than 20 words.': length(20, None),
+                 'Never more than 50 words.': length(None, 50),
+                 'Do not use more than 50 words.': length(None, 50),
+                 'Must not contain over 100 characters.': length(None, 100, 'characters'),
+                 'Do not use 5 words or more.': length(None, 4),
+                 "Don't go under 10 words.": length(10, None),
+                 'Should never exceed 50 words.': length(None, 50),
+                 'More than 3 items.': count(4, None),
+                 'Under 50 words.': length(None, 49)}
+        for criterion, expected in cases.items():
+            self.assertEqual(checks(criterion), ('deterministic', expected), criterion)
+        # A negation further away is not guessed at: the limit goes to the judge.
+        for criterion in ['Do not under any circumstances use more than 50 words.',
+                          'No reply should have more than 3 items.', 'No reply, ever, should have more than 3 items.',
+                          'No answer should, under any circumstances, exceed 50 words.',
+                          'No reply, ever, exceeds 50 words.', 'No emojis, under 50 words.',
+                          # Negations that are not "not": none of these is a minimum.
+                          'Answer without exceeding 50 words.', 'Avoid more than 50 words.', 'Nothing over 50 words.',
+                          'More than 50 words is not allowed.', 'Answers over 50 words fail.',
+                          'None of the keywords should exceed 5 words.']:
+            entry = compile_rubric([criterion])[0]
+            self.assertEqual((entry['method'], entry['checks'], entry['judge_text']), ('llm_judge', [], criterion), criterion)
+
+    def test_limits_code_cannot_place_stay_with_the_judge(self):
+        cases = {'Do not use more than 50 words or exceed 200 characters.':
+                     [{'kind': 'length', 'unit': 'words', 'scope': 'answer', 'min': None, 'max': 50}],
+                 'Never include "spam", keep under 50 words.':
+                     [{'kind': 'contains', 'term': 'spam', 'negate': True, 'scope': 'answer'}],
+                 'No duplicates, the answer should be under 50 words.': [{'kind': 'unique_items'}]}
+        for criterion, expected in cases.items():
+            with self.subTest(criterion=criterion):
+                entry = compile_rubric([criterion])[0]
+                self.assertEqual((entry['method'], entry['checks']), ('hybrid', expected))
+                self.assertTrue(all(run_check('A short answer.', c)[0] for c in entry['checks']))
+                # The judge is told to ignore only what code verified, never the limit left to it.
+                note = entry['judge_text'][len(criterion):]
+                self.assertNotIn('characters', note)
+                self.assertNotIn('lengths', note)
+                if not any(c['kind'] == 'length' for c in expected):
+                    self.assertNotIn('words', note)
+
+    def test_negated_limits_pass_compliant_answers(self):
+        check = checks('The answer should not have more than 3 bullet points.')[1][0]
+        self.assertTrue(run_check('- a\n- b', check)[0])
+        self.assertFalse(run_check('- a\n- b\n- c\n- d\n- e', check)[0])
+        check = checks('No fewer than 3 items.')[1][0]
+        self.assertTrue(run_check('- a\n- b\n- c\n- d', check)[0])
+        self.assertFalse(run_check('- a\n- b', check)[0])
+
+    def test_apostrophes_do_not_end_quoted_terms(self):
+        def contains(term, negate):
+            return [{'kind': 'contains', 'term': term, 'negate': negate, 'scope': 'answer'}]
+        cases = {"Never include 'we're sorry'.": contains("we're sorry", True),
+                 "Must include the phrase 'don't worry'.": contains("don't worry", False),
+                 "Don't mention 'price'.": contains('price', True),
+                 'Don’t mention ‘price’.': contains('price', True),
+                 "It's required to include 'refund policy'.": contains('refund policy', False),
+                 "Do not use the word 'can't'.": contains("can't", True)}
+        for criterion, expected in cases.items():
+            self.assertEqual(checks(criterion)[1], expected, criterion)
+        check = checks("Never include 'we're sorry'.")[1][0]
+        self.assertTrue(run_check('We will ship your order tomorrow.', check)[0])
+        self.assertFalse(run_check("We're sorry for the delay.", check)[0])
+
+    def test_negation_and_coordination_reach_every_quoted_term(self):
+        def contains(*terms, negate=True):
+            return [{'kind': 'contains', 'term': t, 'negate': negate, 'scope': 'answer'} for t in terms]
+        self.assertEqual(checks("Don't mention 'price' or 'discount'."), ('deterministic', contains('price', 'discount')))
+        self.assertEqual(checks("Never use 'a', 'b' or 'c'."), ('deterministic', contains('a', 'b', 'c')))
+        self.assertEqual(checks("Include 'a', 'b', 'c'."), ('deterministic', contains('a', 'b', 'c', negate=False)))
+        # A negation the pattern does not reach, or "either one" wording, is left to the judge whole.
+        for criterion in ["Don't ever mention 'price'.", "Include 'price' or 'discount'.", "You may mention 'price'.",
+                          "Including 'price' is optional.", "Including 'price' is not required.",
+                          "Answers that don't mention 'refund' fail.", "Reject any reply that doesn't include 'refund'.",
+                          "Don't use 'x' unless asked.", "Don't mention 'cheap', 'affordable' is fine.",
+                          "Don't use 'x' more than 3 times."]:
+            entry = compile_rubric([criterion])[0]
+            self.assertEqual((entry['method'], entry['checks'], entry['judge_text']), ('llm_judge', [], criterion), criterion)
+
     def test_numeric_diagnostics_do_not_log_private_rubric_text(self):
         criterion = 'Include the private Customer-DEMO-123 launch plan in approximately 200 words'
         with self.assertLogs('ps_utils.rubric_parser', 'INFO') as logs:
@@ -213,7 +301,7 @@ class CombinedScorerTests(SimpleTestCase):
         p = payload(); p.update(evaluation_mode='rubric', criteria=['Exactly 4 items'],
                                 deterministic_checks=[{'criterion_index': 0, 'criterion': 'stale', 'kind': 'bogus'}])
         manifest = b.validate(p)
-        self.assertEqual(manifest['scoring']['rubric_compiler'], 'rubric-parser-v7')
+        self.assertEqual(manifest['scoring']['rubric_compiler'], 'rubric-parser-v8')
         self.assertEqual(manifest['scoring']['compiled_rubric'][0]['method'], 'deterministic')
         self.assertNotIn('deterministic_checks', manifest['scoring'])
         endpoint = Endpoint(base_url='https://unused.invalid/v1', api_key='never-sent')
