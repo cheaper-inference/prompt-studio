@@ -21,6 +21,7 @@ examples/
 manual/
 .env
 .env.*
+**/staticfiles/
 # Separate optimization-worker runtime data must not enter the GEPA build context.
 workers/optimization/models/
 workers/optimization/nltk_data/

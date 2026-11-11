@@ -83,14 +83,18 @@ export DJANGO_DEBUG=1                       # local HTTP only; never enable on a
 python manage.py migrate                    # creates db.sqlite3 (users, History, job state)
 
 export CHEAPERINFERENCE_API_KEY=...  CHEAPERINFERENCE_BASE_URL=...
-python manage.py runserver 127.0.0.1:8000   # single process is fine
+DJANGO_DEBUG=1 python manage.py runserver 127.0.0.1:8000   # serves source UI assets locally
 ```
 
 Create an account with `python manage.py adduser demo` (prompts for a password).
 Open http://127.0.0.1:8000 and sign in. Self-signup is disabled by default.
 For optimization jobs, also run `python manage.py run_jobs` in another terminal
-with the same exported environment, or use `python ../run_service.py` to
-supervise the web process and worker together. The badge shows whether the
+with the same working directory and exported environment, or use
+`python ../run_service.py` to supervise the web process and worker together.
+Without a worker, jobs remain queued. If you leave `DJANGO_DEBUG=0` (the default),
+run `python manage.py collectstatic --noinput` before launching; WhiteNoise
+serves those collected assets inside the existing Django process.
+The badge shows whether the live
 endpoint is reachable; with no creds the app still runs (dropdowns just stay empty).
 
 > **One replica.** The deploy runs one replica: one Gunicorn process plus

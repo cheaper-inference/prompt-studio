@@ -28,6 +28,10 @@ COPY ps_utils ./ps_utils
 COPY webapp_django ./webapp_django
 COPY test ./test
 
+# Package versioned/compressed UI assets into this same image. The generated key
+# exists only for this build command; deployments still supply their runtime key.
+RUN python -c "import os,secrets,subprocess,sys; os.environ['DJANGO_SECRET_KEY']=secrets.token_urlsafe(64); os.environ['SENTRY_DSN']=''; subprocess.run([sys.executable,'webapp_django/manage.py','collectstatic','--noinput'],check=True)"
+
 # /app/data is the mount point for the Railway volume. Both the app DB and the
 # MLflow store live here so they persist across redeploys.
 RUN mkdir -p /app/data

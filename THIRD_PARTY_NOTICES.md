@@ -5,6 +5,18 @@ Third-party code, documentation, prompts, examples, dependencies, and model
 weights retain their respective copyrights and licenses. The root license does
 not replace their terms.
 
+## Included UI foundations
+
+The selected company-owned design tokens, typography rules, and Keak SVG assets
+included in `webapp_django/optimizer/static/optimizer/ui-kit/` are copyright
+(c) 2026 Cheaper Inference and are distributed under this repository's
+[MIT License](LICENSE). This applies to the selected files shipped here, not
+to the entire private UI kit package.
+
+The public distribution uses system fonts. Switzer font files and their loader
+are not bundled, and the app does not fetch webfonts from a CDN. See the
+[UI foundations guide](docs/UI_KIT.md) for packaging and asset-serving details.
+
 ## GEPA
 
 Prompt Studio builds on [GEPA](https://github.com/gepa-ai/gepa), the reflective

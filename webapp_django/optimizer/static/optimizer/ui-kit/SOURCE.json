@@ -1,0 +1,8 @@
+{
+  "source": "Cheaper Inference shared UI foundations",
+  "version": "0.0.106",
+  "scope": "Selected design tokens, typography and Keak vector assets, adapted for Prompt Studio. React components are not included.",
+  "font_strategy": "System fonts only; no Switzer font files, font-loader CSS, or external font requests.",
+  "license": "MIT",
+  "copyright": "Copyright (c) 2026 Cheaper Inference"
+}

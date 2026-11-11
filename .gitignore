@@ -5,6 +5,7 @@
 !.env.example
 .envrc
 venv/
+/webapp_django/staticfiles/
 
 #ignore python local operation artifacts
 **/__pycache__/

@@ -45,12 +45,17 @@ or labeled training data, then walks through prompts, examples, and run settings
 Describe a task and its requirements, add sample inputs, then review and correct
 judgments as you work. MiniMe uses that feedback to improve its judge prompt.
 
-![MiniMe setup with a synthetic support-reply task](assets/readme/minime.png)
+![MiniMe with a preloaded synthetic release-note review](assets/readme/minime.png)
 
 </details>
 
-*Screenshots show the real UI with synthetic inputs and a local mock model
-catalog. They illustrate setup, not measured model performance or savings.*
+*Screenshots show the real UI with synthetic inputs and a preloaded synthetic
+review. They illustrate the workflow, not measured model performance or savings.*
+
+The interface includes light/dark appearance and responsive shared UI foundations.
+The public build uses system fonts and serves its assets inside Django—no private
+npm package, frontend build, or separate asset server is required.
+See [UI foundations](docs/UI_KIT.md).
 
 ## Pick your starting point
 
@@ -184,6 +189,7 @@ Run the offline checks from the repository root after installing dependencies:
 export DJANGO_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(64))')"
 python test/test_prompt_optimizer.py
 python -m unittest test.test_llm_endpoint test.test_config_security
+python webapp_django/manage.py collectstatic --noinput
 python webapp_django/manage.py test optimizer
 ```
 
