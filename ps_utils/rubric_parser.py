@@ -225,6 +225,11 @@ def _compile_clause(clause, terms, per_item, item_scope):
         if not verb:
             continue
         before, after = text[:match.start()], text[match.end():]
+        if match.group(2) and after.strip(' \t.,:!?'):
+            # A later quoted term may start its own requirement rather than continue
+            # the list: "never mention 'price', 'discount' is required". Keep the
+            # whole requirement with the judge when the list has a continuation.
+            continue
         if _REVERSES.search(before) or _REVERSES.search(after) or _PERMISSIVE.search(text) \
                 or re.search(r'\b(?:times?|once|twice)\b', after):
             # Another negation or an allowance around the term may turn it around: "don't ever mention 'x'",

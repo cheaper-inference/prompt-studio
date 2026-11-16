@@ -158,6 +158,16 @@ class RubricParserTests(SimpleTestCase):
             entry = compile_rubric([criterion])[0]
             self.assertEqual((entry['method'], entry['checks'], entry['judge_text']), ('llm_judge', [], criterion), criterion)
 
+    def test_quoted_list_continuations_do_not_inherit_the_first_terms_requirement(self):
+        for criterion in ["Never mention 'price', 'discount' is required.",
+                          "Include 'refund', 'discount' must be absent.",
+                          "Never include 'spam', 'ham' should appear.",
+                          "Never mention 'price' or 'discount' unless asked."]:
+            with self.subTest(criterion=criterion):
+                entry = compile_rubric([criterion])[0]
+                self.assertEqual((entry['method'], entry['checks'], entry['judge_text']),
+                                 ('llm_judge', [], criterion))
+
     def test_numeric_diagnostics_do_not_log_private_rubric_text(self):
         criterion = 'Include the private Customer-DEMO-123 launch plan in approximately 200 words'
         with self.assertLogs('ps_utils.rubric_parser', 'INFO') as logs:
