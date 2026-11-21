@@ -39,6 +39,26 @@ def _plural(unit):
     return {'entry': 'entries'}.get(unit, unit + 's')
 
 
+_SPACES = re.compile(r'\s+')
+_SENTENCE_OPENERS = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789*_"“\'(-')
+
+
+def _split_sentences(text):
+    """Split after . ! ? where the whitespace that follows leads into a sentence opener.
+
+    Same result as re.split(r'(?<=[.!?])\\s+(?=[A-Z0-9*_"“\\'(-])', text), with each run of
+    whitespace read once.
+    """
+    parts, last = [], 0
+    for run in _SPACES.finditer(text):
+        start, end = run.span()
+        if start and text[start - 1] in '.!?' and end < len(text) and text[end] in _SENTENCE_OPENERS:
+            parts.append(text[last:start])
+            last = end
+    parts.append(text[last:])
+    return parts
+
+
 def _sentences(text):
     """[(sentence, span)]: instruction units with the verbatim prompt text each came from.
     Nested lists are rejoined ("Rules:" + "- At most 5 words") so sub-lines keep their
@@ -47,7 +67,7 @@ def _sentences(text):
     units = []
     for grouped, source in group_criteria(lines):
         own = lines[source[-1]]
-        for sentence in re.split(r'(?<=[.!?])\s+(?=[A-Z0-9*_"“\'(-])', grouped):
+        for sentence in _split_sentences(grouped):
             sentence = sentence.strip()
             if sentence:
                 units.append((sentence, sentence if sentence in text else own))

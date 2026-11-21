@@ -65,12 +65,6 @@ class EndpointConfigError(RuntimeError):
     """Raised when the endpoint cannot be configured from the environment."""
 
 
-def _mask(secret: str) -> str:
-    if not secret:
-        return "<unset>"
-    return f"{secret[:6]}…{secret[-4:]}" if len(secret) > 14 else "…"
-
-
 @dataclass(frozen=True)
 class Endpoint:
     """A configured OpenAI-compatible endpoint plus the per-role plumbing."""
@@ -155,7 +149,7 @@ class Endpoint:
     def summary(self) -> str:
         return (
             f"endpoint   {self.base_url}\n"
-            f"api key    {_mask(self.api_key)}\n"
+            f"api key    {'set' if self.api_key else '<unset>'}\n"
             f"task       {self.task_uri}\n"
             f"judge      {self.judge_uri}\n"
             f"reflection {self.reflection_uri}"
@@ -298,7 +292,7 @@ def _export_openai_env(base_url: str, api_key: str) -> None:
 
     existing_key = os.environ.get("OPENAI_API_KEY")
     if existing_key and existing_key != api_key:
-        _logger.warning("Overriding OPENAI_API_KEY (%s)", _mask(existing_key))
+        _logger.warning("Overriding OPENAI_API_KEY")
     os.environ["OPENAI_API_KEY"] = api_key
 
 

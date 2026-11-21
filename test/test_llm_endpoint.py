@@ -1,5 +1,7 @@
 """Offline endpoint-kwargs contract tests; never instantiate an inference client."""
+import os
 import unittest
+from unittest import mock
 
 from llm_endpoint import DEFAULT_MODEL, Endpoint, configure
 
@@ -62,6 +64,28 @@ class ReflectionKwargsTests(unittest.TestCase):
         self.assertEqual(result["reflection_lm_kwargs"]["extra_headers"], {
             "x-gepa-purpose": "reflection", "x-extra": "value"})
         self.assertEqual(result["reflection_lm_kwargs"]["num_retries"], 2)
+
+
+class KeyRedactionTests(unittest.TestCase):
+    KEY = "sk-fixture-0123456789abcdefghij"
+    URL = "http://127.0.0.1:1234/v1"
+
+    def test_summary_says_whether_a_key_is_set_without_showing_any_of_it(self):
+        summary = Endpoint(base_url=self.URL, api_key=self.KEY).summary()
+        self.assertIn("api key    set", summary)
+        for fragment in (self.KEY, self.KEY[:6], self.KEY[-4:]):
+            self.assertNotIn(fragment, summary)
+        self.assertIn("api key    <unset>", Endpoint(base_url=self.URL, api_key="").summary())
+
+    def test_replacing_an_exported_openai_key_logs_no_part_of_either_key(self):
+        previous = "sk-previous-9876543210zyxwvutsrq"
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": previous}), \
+                self.assertLogs("llm_endpoint", "WARNING") as logs:
+            configure(base_url=self.URL, api_key=self.KEY, env_file=None)
+        logged = "\n".join(logs.output)
+        self.assertIn("Overriding OPENAI_API_KEY", logged)
+        for fragment in (previous[:6], previous[-4:], self.KEY[:6], self.KEY[-4:]):
+            self.assertNotIn(fragment, logged)
 
 
 if __name__ == "__main__":
