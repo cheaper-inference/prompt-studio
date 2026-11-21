@@ -9,6 +9,7 @@ these functions.
 
 from __future__ import annotations
 
+import logging
 import statistics
 import threading
 import time
@@ -18,6 +19,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import sentry_sdk
+
+_logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +341,14 @@ def endpoint_status() -> dict[str, Any]:
         except Exception:  # noqa: BLE001
             required = ("CHEAPERINFERENCE_API_KEY", "CHEAPERINFERENCE_BASE_URL")
         missing = [v for v in required if not os.environ.get(v)]
-        return {"available": False, "detail": f"{type(exc).__name__}: {exc}", "missing": missing}
+        # The reason shown to the user is read from the environment, never from the exception:
+        # an unexpected failure (an unreadable .env, a broken import) can name server paths.
+        if missing:
+            detail = "Set " + " and ".join(f"${v}" for v in missing) + " in the environment or in .env."
+        else:
+            detail = "The endpoint could not be configured. The server log has the cause."
+            _logger.warning("endpoint configuration failed", exc_info=exc)
+        return {"available": False, "detail": detail, "missing": missing}
 
 
 # ---------------------------------------------------------------------------
