@@ -12,8 +12,9 @@ from django.contrib.auth import authenticate, login as auth_login, logout as aut
 from django.conf import settings
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
-from django.http import HttpRequest, HttpResponseNotAllowed, JsonResponse
+from django.http import HttpRequest, HttpResponseNotAllowed, HttpResponseRedirect, JsonResponse
 from django.shortcuts import redirect, render
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 
 from . import services
@@ -100,7 +101,12 @@ def login_view(request: HttpRequest):
             error = "Invalid username or password."
         else:
             auth_login(request, user)
-            return redirect(request.GET.get("next") or "index")
+            # ?next= comes from the address bar: follow it only when it stays on this site.
+            target = request.GET.get("next") or ""
+            if url_has_allowed_host_and_scheme(target, allowed_hosts={request.get_host()},
+                                               require_https=request.is_secure()):
+                return HttpResponseRedirect(target)
+            return redirect("index")
     return render(request, "optimizer/auth.html", {"mode": "login", "error": error, "allow_signup": settings.ALLOW_SIGNUP})
 
 

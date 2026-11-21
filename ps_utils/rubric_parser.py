@@ -8,6 +8,7 @@ judge sees the clause with those limits declared out of scope. No LLM is involve
 import json
 import logging
 import re
+from bisect import bisect_left
 
 log = logging.getLogger(__name__)
 
@@ -81,15 +82,57 @@ def _normalize(text):
 
 # Each quote closes with its own partner. A single quote touching a letter on its outer side is an
 # apostrophe ("don't", "customer's", "don’t"), so it neither opens nor closes a term.
-_QUOTED = re.compile(r'"([^"]+)"|“([^”]+)”|(?<!\w)\'(.+?)\'(?!\w)|(?<!\w)‘(.+?)’(?!\w)')
+_QUOTE_OPEN = re.compile(r'"|“|(?<!\w)[\'‘]')
+_QUOTE_CLOSE = {"'": re.compile(r"'(?!\w)"), '‘': re.compile(r'’(?!\w)')}
+
+
+def _first_from(positions, index):
+    """The first of the ascending ``positions`` at or after ``index``, or -1."""
+    at = bisect_left(positions, index)
+    return positions[at] if at < len(positions) else -1
+
+
+def _quoted_terms(text):
+    """(start, end, term) of every quoted term, left to right.
+
+    Finds what "([^"]+)" | “([^”]+)” | (?<!\\w)'(.+?)'(?!\\w) | (?<!\\w)‘(.+?)’(?!\\w) finds. That
+    pattern rescanned the rest of the text from every opening quote, which is quadratic on a
+    criterion full of unclosed quotes; here each closing quote is looked up instead.
+    """
+    spans, end, closers, line_ends, curly_ahead = [], 0, {}, None, True
+    for opening in _QUOTE_OPEN.finditer(text):
+        start, quote = opening.start(), opening.group()
+        if start < end:
+            continue                                    # inside the previous term
+        if quote == '"':
+            close = text.find('"', start + 1)
+        elif quote == '“':
+            close = text.find('”', start + 1) if curly_ahead else -1
+            curly_ahead = close != -1                   # no ” after this “ means none after a later one
+        else:
+            # '…' and ‘…’ stay on one line and close at the first quote that no letter follows.
+            if quote not in closers:
+                closers[quote] = [found.start() for found in _QUOTE_CLOSE[quote].finditer(text)]
+            if line_ends is None:
+                line_ends = [found.start() for found in re.finditer('\n', text)]
+            close = _first_from(closers[quote], start + 2)
+            line_end = _first_from(line_ends, start + 1)
+            if line_end != -1 and line_end < close:
+                close = -1
+        if close > start + 1:                           # a term has at least one character
+            spans.append((start, close + 1, text[start + 1:close]))
+            end = close + 1
+    return spans
 
 
 def _protect_quotes(text):
-    terms = []
-    def keep(match):
-        terms.append(next(g for g in match.groups() if g is not None))
-        return _PLACEHOLDER.format(len(terms) - 1)
-    return _QUOTED.sub(keep, text), terms
+    terms, kept, last = [], [], 0
+    for start, end, term in _quoted_terms(text):
+        kept += [text[last:start], _PLACEHOLDER.format(len(terms))]
+        terms.append(term)
+        last = end
+    kept.append(text[last:])
+    return ''.join(kept), terms
 
 
 def _clauses(text):
