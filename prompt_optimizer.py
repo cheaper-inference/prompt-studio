@@ -328,7 +328,7 @@ class OptimizerFailed(RuntimeError):
     """The rewriter could not produce a usable prompt. MLflow's zero-shot optimizer would
     log a warning and hand back the original prompt as a success; we fail the job instead.
 
-    code: insufficient_balance | rewriter_unavailable | rewrite_rejected | rewriter_failed
+    code: monthly_budget | insufficient_balance | rewriter_unavailable | rewrite_rejected | rewriter_failed
     message: what the user should read; detail: the underlying error, for logs."""
 
     def __init__(self, code: str, message: str, detail: str = "") -> None:
@@ -341,6 +341,8 @@ class OptimizerFailed(RuntimeError):
 _STATUS = r"(?:error code|status(?: code)?|http(?:/[\d.]+)?)\W{0,3}"
 
 _FAILURE_RULES = (
+    ("monthly_budget", r"\bmonthly_budget\b|API key(?:'s)? monthly (?:spend )?budget",
+     "The rewrite exceeds the API key’s monthly budget. Review the key’s limit before retrying."),
     ("insufficient_balance", r"insufficient[_ ](?:wallet[_ ])?balance|insufficient (?:funds|credit)"
      rf"|{_STATUS}402\b",
      "Your wallet balance can't cover this optimization. Add credit and run it again."),
@@ -509,6 +511,9 @@ def _set_tracing(on: bool) -> bool:
     return before
 
 
+ZERO_SHOT_BUDGET_RETRY_OUTPUT_TOKENS = 4096
+
+
 def strict_metaprompt_optimizer(**kwargs: Any):
     """MLflow's MetaPromptOptimizer, but a failed zero-shot rewrite raises OptimizerFailed
     instead of returning the original prompts as if they had been optimized."""
@@ -516,10 +521,29 @@ def strict_metaprompt_optimizer(**kwargs: Any):
     from mlflow.genai.optimize.types import PromptOptimizerOutput
 
     class StrictMetaPromptOptimizer(MetaPromptOptimizer):
+        def _rewrite_with_budget_retry(self, meta_prompt, enable_tracking):
+            initial_params = self.lm_kwargs
+            params = initial_params or {}
+            initial_limit = params.get("max_completion_tokens")
+            try:
+                return self._call_reflection_model(meta_prompt, enable_tracking)
+            except Exception as exc:
+                if ((initial_limit is not None and initial_limit <= ZERO_SHOT_BUDGET_RETRY_OUTPUT_TOKENS)
+                        or classify_rewriter_failure(exc).code != "monthly_budget"):
+                    raise
+
+            # The gateway rejected the maximum possible charge before inference.
+            # Keep the same key and try once with a smaller maximum output.
+            self.lm_kwargs = {**params, "max_completion_tokens": ZERO_SHOT_BUDGET_RETRY_OUTPUT_TOKENS}
+            try:
+                return self._call_reflection_model(meta_prompt, enable_tracking)
+            finally:
+                self.lm_kwargs = initial_params
+
         def _optimize_zero_shot(self, target_prompts, template_variables, enable_tracking):
             meta_prompt = self._build_zero_shot_meta_prompt(target_prompts, template_variables)
             try:
-                improved = self._call_reflection_model(meta_prompt, enable_tracking)
+                improved = self._rewrite_with_budget_retry(meta_prompt, enable_tracking)
                 self._validate_prompt_names(target_prompts, improved)
                 self._validate_template_variables(target_prompts, improved)
                 # MLflow only tracks {{name}}; GP also fills {{ name }}. A rewrite must keep exactly
@@ -1516,8 +1540,8 @@ class PromptOptimizer:
             refl_extra["timeout"] = config.request_timeout
 
         if config.mode is Mode.ZERO_SHOT:
-            # No output limit here: MLflow's _call_llm sends its own max_completion_tokens
-            # (_DEFAULT_MAX_TOKENS), and a second limit key makes the CI proxy reject the call.
+            # Leave the first attempt's output limit to MLflow. The budget retry
+            # overrides that same max_completion_tokens field to avoid conflicting limits.
             # MLflow retries a timed-out or 5xx rewrite 5 times; with the 90 s timeout a failing run would
             # hang for about 9 minutes. Two retries, and none for errors that will not change on a retry.
             from litellm import RetryPolicy
