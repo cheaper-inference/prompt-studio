@@ -71,7 +71,7 @@ hash-designated context passages; the surrounding request is preserved.
 From this directory, install only the small test dependency set and run:
 
 ```sh
-python -m pip install fastapi==0.116.1 pydantic==2.11.7 httpx==0.28.1
+python -m pip install fastapi==0.133.0 pydantic==2.11.7 httpx==0.28.1
 python -m unittest discover -s . -p 'test_*.py' -v
 ```
 
