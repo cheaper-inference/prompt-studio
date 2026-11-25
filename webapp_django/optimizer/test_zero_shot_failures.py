@@ -32,6 +32,39 @@ class ZeroShotFailureTests(SimpleTestCase):
             self.assertEqual(po.classify_rewriter_failure(MlflowException(mlflow_text)).code, "rewrite_rejected")
         self.assertEqual(po.classify_rewriter_failure(TimeoutError("read timed out")).code, "rewriter_failed")
 
+    def test_monthly_key_budget_is_distinct_from_wallet_balance_or_rate_limiting(self):
+        error = MlflowException(
+            "Failed to call reflection model: litellm.RateLimitError: OpenAIException - "
+            "This request would exceed the API key's monthly budget. "
+            "Adding wallet funds does not increase this key's budget."
+        )
+        with self.assertRaises(po.OptimizerFailed) as caught:
+            strict(error=error)._optimize_zero_shot(PROMPTS, {}, False)
+        self.assertEqual(caught.exception.code, "monthly_budget")
+        self.assertIn("Review the key’s limit", caught.exception.message)
+        self.assertEqual(po.classify_rewriter_failure(Exception("HTTP 429: rate limit")).code,
+                         "rewriter_failed")
+        parse_error = MlflowException("Failed to parse reflection model response as JSON: monthly_budget")
+        self.assertEqual(po.classify_rewriter_failure(parse_error).code, "rewrite_rejected")
+
+    def test_budget_refusal_retries_once_with_less_output_on_the_same_key(self):
+        params = {"max_completion_tokens": 8192, "api_key": "fixture"}
+        optimizer = po.strict_metaprompt_optimizer(reflection_model="openai:/claude-opus-4.8", lm_kwargs=params)
+        limits = []
+
+        def reply(_prompt, _tracking):
+            self.assertEqual(optimizer.lm_kwargs["api_key"], "fixture")
+            limits.append(optimizer.lm_kwargs["max_completion_tokens"])
+            if len(limits) == 1:
+                raise MlflowException("OpenAIException - This request would exceed the API key's monthly budget.")
+            return PROMPTS.copy()
+
+        optimizer._call_reflection_model = mock.Mock(side_effect=reply)
+        result = optimizer._optimize_zero_shot(PROMPTS, {}, False)
+        self.assertEqual(result.optimized_prompts, PROMPTS)
+        self.assertEqual(limits, [8192, po.ZERO_SHOT_BUDGET_RETRY_OUTPUT_TOKENS])
+        self.assertIs(optimizer.lm_kwargs, params)
+
     def test_failed_retry_is_not_reported_as_key_access(self):
         """Production, Nov 4: a timed-out rewrite whose retry crashed (tenacity missing) said
         "Your key can't use the rewriter model" because ModuleNotFoundError matched NotFoundError."""
