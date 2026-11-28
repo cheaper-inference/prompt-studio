@@ -70,7 +70,10 @@ def load(operation):
         if not tokenizer_file.is_file() or hashlib.sha256(tokenizer_file.read_bytes()).hexdigest() != "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7":
             raise HTTPException(503, "Pinned token-counting artifact is not installed")
         from llmlingua import PromptCompressor
-        return PromptCompressor(model_name=path, use_llmlingua2=True, device_map=os.environ.get("OPTIMIZATION_DEVICE", "cpu"))
+        compressor = PromptCompressor(model_name=path, use_llmlingua2=True, device_map=os.environ.get("OPTIMIZATION_DEVICE", "cpu"))
+        # LLMLingua uses the repository name to select its word-boundary rules.
+        compressor.model_name = ARTIFACTS[operation]["model"]
+        return compressor
     if operation == "embed":
         from sentence_transformers import SentenceTransformer
         return SentenceTransformer(path, device=os.environ.get("OPTIMIZATION_DEVICE", "cpu"), local_files_only=True)

@@ -1,5 +1,10 @@
+import hashlib
 import os
+import sys
+import tempfile
 import unittest
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch, Mock
 from fastapi.testclient import TestClient
 import app
@@ -26,6 +31,40 @@ class WorkerContractTests(unittest.TestCase):
                 response = self.client.post(f"/v1/{operation}", headers=self.headers, json={})
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(dispatch.call_args.args[0], operation)
+
+    def test_llmlingua2_restores_pinned_model_name_after_local_load(self):
+        app.load.cache_clear()
+        self.addCleanup(app.load.cache_clear)
+
+        llmlingua = ModuleType("llmlingua")
+        llmlingua.PromptCompressor = Mock(side_effect=SimpleNamespace)
+        transformers = ModuleType("transformers")
+        transformers.AutoTokenizer = Mock()
+        transformers.AutoModelForSequenceClassification = Mock()
+        modules = {"llmlingua": llmlingua, "torch": ModuleType("torch"), "transformers": transformers}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_path = root / "models" / "llmlingua2"
+            model_path.mkdir(parents=True)
+            tiktoken_path = root / "models" / "tiktoken"
+            tiktoken_path.mkdir()
+            url = "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+            (tiktoken_path / hashlib.sha1(url.encode()).hexdigest()).write_bytes(b"test tokenizer")
+
+            with (
+                patch.dict(sys.modules, modules),
+                patch.object(app, "ROOT", root),
+                patch.object(app, "hashlib", wraps=hashlib) as hashes,
+            ):
+                hashes.sha256.return_value = Mock()
+                hashes.sha256.return_value.hexdigest.return_value = (
+                    "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
+                )
+                compressor = app.load("llmlingua2")
+
+            self.assertEqual(llmlingua.PromptCompressor.call_args.kwargs["model_name"], str(model_path))
+            self.assertEqual(compressor.model_name, app.ARTIFACTS["llmlingua2"]["model"])
 
     def test_request_limits_reject_before_execution(self):
         with patch.object(app, "_dispatch") as dispatch:
